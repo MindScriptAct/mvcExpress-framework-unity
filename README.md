@@ -10,6 +10,10 @@
 - .NET Standard 2.1, C# 9
 - No third-party dependencies
 
+## Documentation
+
+Full docs, guides, and API reference: **[mvcexpress.org](https://www.mvcexpress.org/)**
+
 ## Installation
 
 Add via **Window > Package Manager > Add package from git URL**:
@@ -146,10 +150,6 @@ Three importable sample projects (**Window > Package Manager > mvcExpress > Samp
 | 01 - Single Module Unity App | Unity Inspector drag-drop |
 | 02 - Single Module Code App | Code-first |
 | 03 - Single Module Attribute App | Attribute-based |
-
-## Documentation
-
-Full docs, guides, and API reference: **[mvcexpress.org](https://www.mvcexpress.org/)**
 
 ## Roadmap
 
