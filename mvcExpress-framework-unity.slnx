@@ -1,0 +1,7 @@
+﻿<Solution>
+  <Project Path="org.mvcexpress.core.csproj" />
+  <Project Path="org.mvcexpress.core.Tests.csproj" />
+  <Project Path="org.mvcexpress.core.Editor.csproj" />
+  <Project Path="org.mvcexpress.core.Editor.Tests.csproj" />
+  <Project Path="org.mvcexpress.core.Tests.Scenarios.csproj" />
+</Solution>

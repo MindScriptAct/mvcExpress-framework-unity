@@ -1,0 +1,31 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3d36c6e2e41240b2aa9a066752d1d89e, type: 3}
+  m_Name: SingleModuleApp_CodeStyle_ViewPrefabCatalog
+  m_EditorClassIdentifier: org.mvcexpress.core::mvcExpress.ViewPrefabCatalog
+  _mediatorPrefabs:
+  - MediatorTypeName: mvcExpress.Samples.SingleModuleCodeApp.View.SingleModuleCodeCanvasMediatorBehaviour,
+      Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null
+    MediatorScript: {fileID: 11500000, guid: c0f468ca470096b4589b13033e5f562a, type: 3}
+    Prefab: {fileID: 7769488923137474588, guid: 6be78897cc659e54582a592ccc9eae87, type: 3}
+    AddDebugInstance: 0
+    DebugParentMediatorTypeName: 
+    DebugParentContainerPath: 
+    DebugViewRootContainerPath: 
+  - MediatorTypeName: mvcExpress.Samples.SingleModuleCodeApp.View.SingleModuleCodeHudMediatorBehaviour,
+      Assembly-CSharp, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null
+    MediatorScript: {fileID: 11500000, guid: b4f2bf04df01ab144911b96acf74c636, type: 3}
+    Prefab: {fileID: 6517394437516678747, guid: 7e4127433e53ed7488602117274b8d5b, type: 3}
+    AddDebugInstance: 0
+    DebugParentMediatorTypeName: 
+    DebugParentContainerPath: 
+    DebugViewRootContainerPath: 
