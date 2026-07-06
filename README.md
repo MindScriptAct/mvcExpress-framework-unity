@@ -1,8 +1,38 @@
 # mvcExpress
 
-![Version](https://img.shields.io/badge/version-0.9.1-blue) ![Unity](https://img.shields.io/badge/unity-2021.3%2B-black) ![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-0.9.2-blue) ![Unity](https://img.shields.io/badge/unity-2021.3%2B-black) ![License](https://img.shields.io/badge/license-MIT-green)
 
 **A lightweight, type-safe MVC framework for Unity, built for performance and team scalability.**
+
+## Requirements
+
+- Unity 2021.3+
+- .NET Standard 2.1, C# 9
+- No third-party dependencies
+
+## Installation
+
+Add via **Window > Package Manager > Add package from git URL**:
+
+```
+https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress.core
+```
+
+Or add directly to `Packages/manifest.json`:
+
+```json
+{
+  "dependencies": {
+    "org.mvcexpress.core": "https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress.core"
+  }
+}
+```
+
+Pin to a specific version by appending a tag:
+
+```
+https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress.core#0.9.2
+```
 
 ## Why mvcExpress exists
 
@@ -56,39 +86,12 @@ View input becomes a published message. A bound Command reads/writes a Proxy and
 
 - More ceremony than a raw MonoBehaviour for a one-off script: a simple action is a Message plus a Command plus a binding, not just a method call
 - The message bus is application-wide with no per-module filtering;
-- Async commands have no built-in `CancellationToken` - cancellation is on you, typically via a Proxy or Service holding a `CancellationTokenSource`
+- `CommandAsync` gets a module-scoped `CancelToken` automatically (cancelled when the module is destroyed), but Proxies and Services do not - they still need their own `CancellationTokenSource` if they run independent background work
 - Pre-1.0 (`0.9.x`): the public API is close to settled but may still shift before `1.0`, and some tooling (composition-style hard enforcement, the debugging suite) is still in progress
 - Opinionated by design: teams that want unrestricted freedom in where logic lives may feel the actor boundaries as friction
 
-## Requirements
 
-- Unity 2021.3+
-- .NET Standard 2.1, C# 9
-- No third-party dependencies
 
-## Installation
-
-Add via **Window > Package Manager > Add package from git URL**:
-
-```
-https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress
-```
-
-Or add directly to `Packages/manifest.json`:
-
-```json
-{
-  "dependencies": {
-    "org.mvcexpress": "https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress"
-  }
-}
-```
-
-Pin to a specific version by appending a tag:
-
-```
-https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress#0.9.1
-```
 
 ## Quick example
 
@@ -119,7 +122,7 @@ public class AddGoldCommand : Command<int>
 public class GameplayModule : MvcModule
 {
     protected override void RegisterProxies() =>
-        Container.Register(new WalletProxy()).ToLogic().AsPersistent();
+        Container.Register(new WalletProxy()).ToLogic().AsPermanent();
 
     protected override void BindCommands() =>
         Commander.Bind<AddGoldCommand, AddGoldMessage, int>();

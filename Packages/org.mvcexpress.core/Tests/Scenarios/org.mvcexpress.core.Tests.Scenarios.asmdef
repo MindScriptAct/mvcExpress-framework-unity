@@ -1,0 +1,23 @@
+{
+    "name": "org.mvcexpress.core.Tests.Scenarios",
+    "rootNamespace": "mvcExpress.Tests.Scenarios",
+    "references": [
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner",
+        "org.mvcexpress.core",
+        "org.mvcexpress.core.Tests"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
