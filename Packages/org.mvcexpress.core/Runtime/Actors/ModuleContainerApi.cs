@@ -22,8 +22,11 @@ namespace mvcExpress
             _context = context;
         }
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool UseViewScope => _context.Category == MvcLogContext.LogCategory.Mediator;
+        private bool UseViewScope
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => _context.Category == MvcLogContext.LogCategory.Mediator;
+        }
 
         /// <summary>
         /// Resolves a dependency from the current actor scope.

@@ -1,6 +1,6 @@
 {
   "name": "org.mvcexpress.core",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "displayName": "mvcExpress",
   "description": "Lightweight MVC framework for Unity focusing on performance and ease of use. Includes dependency injection, messaging, and a modular architecture.",
   "unity": "2021.3",

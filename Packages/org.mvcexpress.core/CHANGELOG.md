@@ -2,6 +2,12 @@
 
 All notable changes to `org.mvcexpress.core` are documented here.
 
+## [0.9.4] - 2026-08-12
+
+### Fixed
+
+- Build-breaking `CS0592` in `ModuleContainerApi`: `[MethodImpl(AggressiveInlining)]` was placed directly on the `UseViewScope` property declaration, which C# only allows on a method, constructor, or explicit accessor. Moved to target the `get` accessor directly. Package would not compile in 0.9.3.
+
 ## [0.9.3] - 2026-08-12
 
 ### Added
