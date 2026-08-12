@@ -1,6 +1,6 @@
 # mvcExpress
 
-![Version](https://img.shields.io/badge/version-0.9.2-blue) ![Unity](https://img.shields.io/badge/unity-2021.3%2B-black) ![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-0.9.3-blue) ![Unity](https://img.shields.io/badge/unity-2021.3%2B-black) ![License](https://img.shields.io/badge/license-MIT-green)
 
 **A lightweight, type-safe MVC framework for Unity, built for performance and team scalability.**
 
@@ -35,7 +35,7 @@ Or add directly to `Packages/manifest.json`:
 Pin to a specific version by appending a tag:
 
 ```
-https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress.core#0.9.2
+https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress.core#0.9.3
 ```
 
 ## Why mvcExpress exists

@@ -93,7 +93,7 @@ namespace mvcExpress
                 MvcLogContext.LogCategory.Mediator);
             _messenger = new MediatorMessengerApi(_actorContext);
             _container = new ModuleContainerApi(_actorContext);
-            _globalContainer = new GlobalContainerApi();
+            _globalContainer = new GlobalContainerApi(useViewScope: true);
             _mediatorHub = new MediatorHubApi(this);
             _dependenciesLinked = true;
 

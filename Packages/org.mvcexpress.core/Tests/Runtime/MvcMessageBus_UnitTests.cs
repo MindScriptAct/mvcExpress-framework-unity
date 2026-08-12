@@ -18,6 +18,7 @@ namespace mvcExpress.Tests
         private struct TestMessage : IMessage { }
         private struct TestMessage2 : IMessage { }
         private struct MultiInterfaceMessage : IMessage, IMessage<int> { }
+        private struct Arity12Message : IMessage<int, int, int, int, int, int, int, int, int, int, int, int> { }
 
         [Test]
         public void Subscribe_Publish_HandlerInvoked()
@@ -125,6 +126,42 @@ namespace mvcExpress.Tests
             var (total, active) = bus.GetAggregateSubscriptionStatistics();
             Assert.That(total, Is.EqualTo(2));
             Assert.That(active, Is.EqualTo(2));
+        }
+
+        [Test]
+        public void SubscribePublishUnsubscribe_Arity12_WorksLikeLowerArities()
+        {
+            using var bus = new MvcMessageBus();
+            int callCount = 0;
+            int lastSum = 0;
+            string lastPayloadSequence = null;
+
+            void Handler(int p1, int p2, int p3, int p4, int p5, int p6, int p7, int p8, int p9, int p10, int p11, int p12)
+            {
+                callCount++;
+                lastSum = p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9 + p10 + p11 + p12;
+                lastPayloadSequence = $"{p1}-{p2}-{p3}-{p4}-{p5}-{p6}-{p7}-{p8}-{p9}-{p10}-{p11}-{p12}";
+            }
+
+            var token = bus.Subscribe<Arity12Message, int, int, int, int, int, int, int, int, int, int, int, int>(Handler);
+            bus.Publish<Arity12Message, int, int, int, int, int, int, int, int, int, int, int, int>(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+
+            Assert.That(callCount, Is.EqualTo(1),
+                "Arity-12 publish/subscribe should dispatch exactly like every lower arity - " +
+                "this is a template-drift smoke test since Params03-12 are mechanically generated " +
+                "from the same Params00/01 pattern already covered by other tests in this file.");
+            Assert.That(lastSum, Is.EqualTo(78),
+                "All twelve payload values must be forwarded to the handler unchanged (1+2+...+12=78).");
+            Assert.That(lastPayloadSequence, Is.EqualTo("1-2-3-4-5-6-7-8-9-10-11-12"),
+                "Payload values must be forwarded to the handler in the exact positional order they were published - " +
+                "the sum check alone cannot detect a parameter-ordering/positional-swap bug because addition is " +
+                "commutative (any permutation of 1..12 sums to 78).");
+
+            bus.Unsubscribe<Arity12Message, int, int, int, int, int, int, int, int, int, int, int, int>(token);
+            bus.Publish<Arity12Message, int, int, int, int, int, int, int, int, int, int, int, int>(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+
+            Assert.That(callCount, Is.EqualTo(1),
+                "Unsubscribe-by-token at arity 12 must remove the handler, so a second publish must not invoke it again.");
         }
 
         [Test]

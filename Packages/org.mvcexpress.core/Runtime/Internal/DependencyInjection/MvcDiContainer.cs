@@ -19,10 +19,8 @@ namespace mvcExpress.Internal.DependencyInjection
     {
         private readonly MvcDiContainer _container;
         private readonly object _instance;
-        private Type _logicType;
-        private Type _viewType;
-        private bool _registerToLogic;
-        private bool _registerToView;
+        private readonly List<Type> _logicTypes = new List<Type>();
+        private readonly List<Type> _viewTypes = new List<Type>();
         private bool _isTransient = false;
         private bool _isScoped = false;
         private bool _completed = false;
@@ -36,61 +34,36 @@ namespace mvcExpress.Internal.DependencyInjection
         {
             _container = container ?? throw new ArgumentNullException(nameof(container));
             _instance = instance ?? throw new ArgumentNullException(nameof(instance));
-
-            // Default: register as instance type
-            _logicType = instance.GetType();
-            _viewType = instance.GetType();
-            _registerToLogic = false;
-            _registerToView = false;
         }
 
-        /// <summary>
-        /// Register to logic layer as concrete type.
-        /// </summary>
         public RegistrationBuilder<T> ToLogic()
         {
             ThrowIfCompleted();
-            _registerToLogic = true;
-            _logicType = _instance.GetType();
+            AddLogicType(_instance.GetType());
             return this;
         }
 
-        /// <summary>
-        /// Register to logic layer as specified type.
-        /// </summary>
         public RegistrationBuilder<T> ToLogicAs<TLogic>()
         {
             ThrowIfCompleted();
-            _registerToLogic = true;
-            _logicType = typeof(TLogic);
+            AddLogicType(typeof(TLogic));
             return this;
         }
 
-        /// <summary>
-        /// Register to view layer as concrete type.
-        /// </summary>
         public RegistrationBuilder<T> ToView()
         {
             ThrowIfCompleted();
-            _registerToView = true;
-            _viewType = _instance.GetType();
+            AddViewType(_instance.GetType());
             return this;
         }
 
-        /// <summary>
-        /// Register to view layer as specified type.
-        /// </summary>
         public RegistrationBuilder<T> ToViewAs<TView>()
         {
             ThrowIfCompleted();
-            _registerToView = true;
-            _viewType = typeof(TView);
+            AddViewType(typeof(TView));
             return this;
         }
 
-        /// <summary>
-        /// Register to logic layer as List of specified type.
-        /// </summary>
         public RegistrationBuilder<T> ToLogicList<TLogic>()
         {
             ThrowIfCompleted();
@@ -99,9 +72,6 @@ namespace mvcExpress.Internal.DependencyInjection
             return this;
         }
 
-        /// <summary>
-        /// Register to view layer as List of specified type.
-        /// </summary>
         public RegistrationBuilder<T> ToViewList<TView>()
         {
             ThrowIfCompleted();
@@ -110,9 +80,6 @@ namespace mvcExpress.Internal.DependencyInjection
             return this;
         }
 
-        /// <summary>
-        /// Complete registration as permanent dependency.
-        /// </summary>
         public void AsPermanent()
         {
             ThrowIfCompleted();
@@ -120,9 +87,6 @@ namespace mvcExpress.Internal.DependencyInjection
             Complete();
         }
 
-        /// <summary>
-        /// Complete registration as transient dependency.
-        /// </summary>
         public void AsTransient()
         {
             ThrowIfCompleted();
@@ -130,15 +94,34 @@ namespace mvcExpress.Internal.DependencyInjection
             Complete();
         }
 
-        /// <summary>
-        /// Complete registration as scoped dependency.
-        /// </summary>
         public void AsScoped()
         {
             ThrowIfCompleted();
             _isScoped = true;
             _isTransient = false;
             Complete();
+        }
+
+        private void AddLogicType(Type type)
+        {
+            if (_logicTypes.Contains(type))
+            {
+                throw new InvalidOperationException(
+                    $"'{type.Name}' was already mapped to logic scope in this Register(...) chain. " +
+                    $"Each type may only be mapped once per chain.");
+            }
+            _logicTypes.Add(type);
+        }
+
+        private void AddViewType(Type type)
+        {
+            if (_viewTypes.Contains(type))
+            {
+                throw new InvalidOperationException(
+                    $"'{type.Name}' was already mapped to view scope in this Register(...) chain. " +
+                    $"Each type may only be mapped once per chain.");
+            }
+            _viewTypes.Add(type);
         }
 
         private void ThrowIfCompleted()
@@ -155,7 +138,7 @@ namespace mvcExpress.Internal.DependencyInjection
             if (_completed) return;
             _completed = true;
 
-            if (!_registerToLogic && !_registerToView && !_registerToLogicList && !_registerToViewList)
+            if (_logicTypes.Count == 0 && _viewTypes.Count == 0 && !_registerToLogicList && !_registerToViewList)
             {
                 throw new InvalidOperationException(
                     "Must register to at least one layer. Call .ToLogic(), .ToLogicAs<T>(), .ToView(), .ToViewAs<T>, .ToLogicList<T>(), or .ToViewList<T>() before completing registration.");
@@ -163,27 +146,22 @@ namespace mvcExpress.Internal.DependencyInjection
 
             if (_isScoped)
             {
-                // AsScoped means: do not register an instance; register the type as scoped factory instead.
-                // The container constructs instances itself via Activator.CreateInstance, which only
-                // works for plain C# types - MonoBehaviours require AddComponent/Instantiate instead.
                 if (_instance is UnityEngine.MonoBehaviour)
                 {
                     throw new InvalidOperationException(
                         $"[MvcExpress] AsScoped() is not supported for MonoBehaviour types. '{_instance.GetType().FullName}' is a MonoBehaviour - Scoped requires the container to construct the instance itself via Activator.CreateInstance, which isn't possible for Unity components. Use Permanent or Transient instead.");
                 }
 
-                if (_registerToLogic) _container.MarkScoped(_logicType);
-                if (_registerToView) _container.MarkScoped(_viewType);
+                foreach (var t in _logicTypes) _container.MarkScoped(t);
+                foreach (var t in _viewTypes) _container.MarkScoped(t);
                 return;
             }
 
             _container.RegisterInternal(
                 _instance,
-                _logicType,
-                _viewType,
+                _logicTypes,
+                _viewTypes,
                 _isTransient,
-                _registerToLogic,
-                _registerToView,
                 _registerToLogicList,
                 _logicListElementType,
                 _registerToViewList,
@@ -191,18 +169,13 @@ namespace mvcExpress.Internal.DependencyInjection
         }
     }
 
-    /// <summary>
-    /// Non-generic fluent builder for dependency registration.
-    /// </summary>
     public sealed class RegistrationBuilder
     {
         private readonly MvcDiContainer _container;
         private readonly object _instance;
         private readonly Type _instanceType;
-        private Type _logicType;
-        private Type _viewType;
-        private bool _registerToLogic;
-        private bool _registerToView;
+        private readonly List<Type> _logicTypes = new List<Type>();
+        private readonly List<Type> _viewTypes = new List<Type>();
         private bool _isTransient = false;
         private bool _isScoped = false;
         private bool _completed = false;
@@ -217,65 +190,38 @@ namespace mvcExpress.Internal.DependencyInjection
             _container = container ?? throw new ArgumentNullException(nameof(container));
             _instance = instance ?? throw new ArgumentNullException(nameof(instance));
             _instanceType = type ?? throw new ArgumentNullException(nameof(type));
-
-            // Default: register as specified type
-            _logicType = type;
-            _viewType = type;
-            _registerToLogic = false;
-            _registerToView = false;
         }
 
-        /// <summary>
-        /// Register to logic layer as specified type.
-        /// </summary>
         public RegistrationBuilder ToLogic()
         {
             ThrowIfCompleted();
-            _registerToLogic = true;
-            _logicType = _instanceType;
+            AddLogicType(_instanceType);
             return this;
         }
 
-        /// <summary>
-        /// Register to logic layer as specified type.
-        /// </summary>
         public RegistrationBuilder ToLogicAs(Type logicType)
         {
             ThrowIfCompleted();
-            if (logicType == null)
-                throw new ArgumentNullException(nameof(logicType));
-            _registerToLogic = true;
-            _logicType = logicType;
+            if (logicType == null) throw new ArgumentNullException(nameof(logicType));
+            AddLogicType(logicType);
             return this;
         }
 
-        /// <summary>
-        /// Register to view layer as specified type.
-        /// </summary>
         public RegistrationBuilder ToView()
         {
             ThrowIfCompleted();
-            _registerToView = true;
-            _viewType = _instanceType;
+            AddViewType(_instanceType);
             return this;
         }
 
-        /// <summary>
-        /// Register to view layer as specified type.
-        /// </summary>
         public RegistrationBuilder ToViewAs(Type viewType)
         {
             ThrowIfCompleted();
-            if (viewType == null)
-                throw new ArgumentNullException(nameof(viewType));
-            _registerToView = true;
-            _viewType = viewType;
+            if (viewType == null) throw new ArgumentNullException(nameof(viewType));
+            AddViewType(viewType);
             return this;
         }
 
-        /// <summary>
-        /// Register to logic layer as List of specified type.
-        /// </summary>
         public RegistrationBuilder ToLogicList(Type elementType)
         {
             ThrowIfCompleted();
@@ -284,9 +230,6 @@ namespace mvcExpress.Internal.DependencyInjection
             return this;
         }
 
-        /// <summary>
-        /// Register to view layer as List of specified type.
-        /// </summary>
         public RegistrationBuilder ToViewList(Type elementType)
         {
             ThrowIfCompleted();
@@ -295,9 +238,6 @@ namespace mvcExpress.Internal.DependencyInjection
             return this;
         }
 
-        /// <summary>
-        /// Complete registration as permanent dependency.
-        /// </summary>
         public void AsPermanent()
         {
             ThrowIfCompleted();
@@ -305,9 +245,6 @@ namespace mvcExpress.Internal.DependencyInjection
             Complete();
         }
 
-        /// <summary>
-        /// Complete registration as transient dependency.
-        /// </summary>
         public void AsTransient()
         {
             ThrowIfCompleted();
@@ -315,15 +252,34 @@ namespace mvcExpress.Internal.DependencyInjection
             Complete();
         }
 
-        /// <summary>
-        /// Complete registration as scoped dependency.
-        /// </summary>
         public void AsScoped()
         {
             ThrowIfCompleted();
             _isScoped = true;
             _isTransient = false;
             Complete();
+        }
+
+        private void AddLogicType(Type type)
+        {
+            if (_logicTypes.Contains(type))
+            {
+                throw new InvalidOperationException(
+                    $"'{type.Name}' was already mapped to logic scope in this Register(...) chain. " +
+                    $"Each type may only be mapped once per chain.");
+            }
+            _logicTypes.Add(type);
+        }
+
+        private void AddViewType(Type type)
+        {
+            if (_viewTypes.Contains(type))
+            {
+                throw new InvalidOperationException(
+                    $"'{type.Name}' was already mapped to view scope in this Register(...) chain. " +
+                    $"Each type may only be mapped once per chain.");
+            }
+            _viewTypes.Add(type);
         }
 
         private void ThrowIfCompleted()
@@ -340,7 +296,7 @@ namespace mvcExpress.Internal.DependencyInjection
             if (_completed) return;
             _completed = true;
 
-            if (!_registerToLogic && !_registerToView && !_registerToLogicList && !_registerToViewList)
+            if (_logicTypes.Count == 0 && _viewTypes.Count == 0 && !_registerToLogicList && !_registerToViewList)
             {
                 throw new InvalidOperationException(
                     "Must register to at least one layer. Call .ToLogic(), .ToLogicAs(), .ToView(), .ToViewAs(), .ToLogicList(), or .ToViewList() before completing registration.");
@@ -348,27 +304,22 @@ namespace mvcExpress.Internal.DependencyInjection
 
             if (_isScoped)
             {
-                // AsScoped means: do not register an instance; register the type as scoped factory instead.
-                // The container constructs instances itself via Activator.CreateInstance, which only
-                // works for plain C# types - MonoBehaviours require AddComponent/Instantiate instead.
                 if (_instance is UnityEngine.MonoBehaviour)
                 {
                     throw new InvalidOperationException(
                         $"[MvcExpress] AsScoped() is not supported for MonoBehaviour types. '{_instance.GetType().FullName}' is a MonoBehaviour - Scoped requires the container to construct the instance itself via Activator.CreateInstance, which isn't possible for Unity components. Use Permanent or Transient instead.");
                 }
 
-                if (_registerToLogic) _container.MarkScoped(_logicType);
-                if (_registerToView) _container.MarkScoped(_viewType);
+                foreach (var t in _logicTypes) _container.MarkScoped(t);
+                foreach (var t in _viewTypes) _container.MarkScoped(t);
                 return;
             }
 
             _container.RegisterInternal(
                 _instance,
-                _logicType,
-                _viewType,
+                _logicTypes,
+                _viewTypes,
                 _isTransient,
-                _registerToLogic,
-                _registerToView,
                 _registerToLogicList,
                 _logicListElementType,
                 _registerToViewList,
@@ -711,11 +662,9 @@ namespace mvcExpress.Internal.DependencyInjection
         /// </summary>
         internal void RegisterInternal(
             object obj,
-            Type logicType,
-            Type viewType,
+            IReadOnlyList<Type> logicTypes,
+            IReadOnlyList<Type> viewTypes,
             bool isTransient,
-            bool registerToLogic,
-            bool registerToView,
             bool registerToLogicList,
             Type logicListElementType,
             bool registerToViewList,
@@ -724,10 +673,12 @@ namespace mvcExpress.Internal.DependencyInjection
             if (obj == null)
                 throw new InvalidOperationException("Cannot register null instance.");
 
+            bool registerToLogic = logicTypes.Count > 0;
+            bool registerToView = viewTypes.Count > 0;
+
             if (!registerToLogic && !registerToView && !registerToLogicList && !registerToViewList)
                 throw new InvalidOperationException("Must register to at least one scope (logic, view, logic list, or view list).");
 
-            // Important: list keys are List<TElement>, so they must not be scoped either.
             if (registerToLogicList)
             {
                 var listType = typeof(List<>).MakeGenericType(logicListElementType);
@@ -741,54 +692,99 @@ namespace mvcExpress.Internal.DependencyInjection
                     throw new InvalidOperationException("[MvcExpress] Attempted to register an instance for a scoped list type.");
             }
 
-            // Existing single registrations
-            if (registerToLogic)
+            // Phase 1: validate every requested key is free before mutating anything, so a chain
+            // requesting N types either registers all N or none of them.
+            for (int i = 0; i < logicTypes.Count; i++)
             {
-                var isInterface = _isInterfaceCache.GetOrAdd(logicType, t => t.IsInterface);
+                var type = logicTypes[i];
+                var isInterface = _isInterfaceCache.GetOrAdd(type, t => t.IsInterface);
                 var targetDict = isInterface ? _logicInterfaces : _logicObjects;
-
-                if (!targetDict.TryAdd(logicType, obj))
+                if (targetDict.ContainsKey(type))
                 {
                     throw new InvalidOperationException(
-                        $"Type '{logicType.Name}' already registered in logic container. " +
+                        $"Type '{type.Name}' already registered in logic container. " +
                         $"Each type can only be registered once per scope. " +
                         $"Use distinct types or create a composite class for multiple implementations.");
                 }
-
-                // Track lifecycle (transient vs permanent) for invalidation on unregister
-                _transientTypes[logicType] = isTransient;
-                IncrementInstanceRefCount(obj);
             }
-
-            // Register to view container if requested
-            if (registerToView)
+            for (int i = 0; i < viewTypes.Count; i++)
             {
-                var isInterface = _isInterfaceCache.GetOrAdd(viewType, t => t.IsInterface);
+                var type = viewTypes[i];
+                var isInterface = _isInterfaceCache.GetOrAdd(type, t => t.IsInterface);
                 var targetDict = isInterface ? _viewInterfaces : _viewObjects;
-
-                if (!targetDict.TryAdd(viewType, obj))
+                if (targetDict.ContainsKey(type))
                 {
-                    // Rollback logic registration if view registration fails
-                    if (registerToLogic)
-                    {
-                        var logicIsInterface = _isInterfaceCache.GetOrAdd(logicType, t => t.IsInterface);
-                        var logicDict = logicIsInterface ? _logicInterfaces : _logicObjects;
-                        logicDict.TryRemove(logicType, out _);
-                        _transientTypes.TryRemove(logicType, out _);
-                        DecrementInstanceRefCount(obj); // undo the increment above - this registration never took effect
-                    }
                     throw new InvalidOperationException(
-                        $"Type '{viewType.Name}' already registered in view container. " +
+                        $"Type '{type.Name}' already registered in view container. " +
                         $"Each type can only be registered once per scope. " +
                         $"Use distinct types or create a composite class for multiple implementations.");
                 }
-
-                // Track lifecycle for view registration too
-                IncrementInstanceRefCount(obj);
-                _transientTypes[viewType] = isTransient;
             }
 
-            // List registrations (multi bind)
+            // Phase 2: commit. TryAdd can still fail here under a concurrent registration racing
+            // between phase 1 and phase 2 (both dictionaries are ConcurrentDictionary) - roll back
+            // everything this call already added and re-throw, so the chain stays all-or-nothing.
+            var addedLogic = new List<Type>(logicTypes.Count);
+            var addedView = new List<Type>(viewTypes.Count);
+            try
+            {
+                for (int i = 0; i < logicTypes.Count; i++)
+                {
+                    var type = logicTypes[i];
+                    var isInterface = _isInterfaceCache.GetOrAdd(type, t => t.IsInterface);
+                    var targetDict = isInterface ? _logicInterfaces : _logicObjects;
+                    if (!targetDict.TryAdd(type, obj))
+                    {
+                        throw new InvalidOperationException(
+                            $"Type '{type.Name}' already registered in logic container. " +
+                            $"Each type can only be registered once per scope. " +
+                            $"Use distinct types or create a composite class for multiple implementations.");
+                    }
+                    _transientTypes[type] = isTransient;
+                    IncrementInstanceRefCount(obj);
+                    addedLogic.Add(type);
+                }
+
+                for (int i = 0; i < viewTypes.Count; i++)
+                {
+                    var type = viewTypes[i];
+                    var isInterface = _isInterfaceCache.GetOrAdd(type, t => t.IsInterface);
+                    var targetDict = isInterface ? _viewInterfaces : _viewObjects;
+                    if (!targetDict.TryAdd(type, obj))
+                    {
+                        throw new InvalidOperationException(
+                            $"Type '{type.Name}' already registered in view container. " +
+                            $"Each type can only be registered once per scope. " +
+                            $"Use distinct types or create a composite class for multiple implementations.");
+                    }
+                    _transientTypes[type] = isTransient;
+                    IncrementInstanceRefCount(obj);
+                    addedView.Add(type);
+                }
+            }
+            catch
+            {
+                for (int i = 0; i < addedLogic.Count; i++)
+                {
+                    var type = addedLogic[i];
+                    var isInterface = _isInterfaceCache.GetOrAdd(type, t => t.IsInterface);
+                    var dict = isInterface ? _logicInterfaces : _logicObjects;
+                    dict.TryRemove(type, out _);
+                    _transientTypes.TryRemove(type, out _);
+                    DecrementInstanceRefCount(obj);
+                }
+                for (int i = 0; i < addedView.Count; i++)
+                {
+                    var type = addedView[i];
+                    var isInterface = _isInterfaceCache.GetOrAdd(type, t => t.IsInterface);
+                    var dict = isInterface ? _viewInterfaces : _viewObjects;
+                    dict.TryRemove(type, out _);
+                    _transientTypes.TryRemove(type, out _);
+                    DecrementInstanceRefCount(obj);
+                }
+                throw;
+            }
+
             if (registerToLogicList)
             {
                 AddToListBinding(obj, logicListElementType, useView: false, isTransient: isTransient);
@@ -801,13 +797,21 @@ namespace mvcExpress.Internal.DependencyInjection
 
             // Reject scoped registration for MonoBehaviour instances (only non-MonoBehaviour
             // types can be scoped - see the matching guard in RegistrationBuilder.Complete()).
-            if (_scopedTypes.TryGetValue(logicType, out _) && obj is UnityEngine.MonoBehaviour)
+            // Preserves the original single-key check's timing: this runs after commit, matching
+            // existing (pre-existing, out-of-scope-to-fix) behavior where a MonoBehaviour+Scoped
+            // conflict throws after the instance is already registered under its other key(s).
+            if (obj is UnityEngine.MonoBehaviour)
             {
-                throw new InvalidOperationException($"[MvcExpress] Scoped registration cannot be combined with a MonoBehaviour instance registration. '{logicType.FullName}' is a MonoBehaviour.");
-            }
-            if (registerToView && _scopedTypes.TryGetValue(viewType, out _) && obj is UnityEngine.MonoBehaviour)
-            {
-                throw new InvalidOperationException($"[MvcExpress] Scoped registration cannot be combined with a MonoBehaviour instance registration. '{viewType.FullName}' is a MonoBehaviour.");
+                for (int i = 0; i < logicTypes.Count; i++)
+                {
+                    if (_scopedTypes.TryGetValue(logicTypes[i], out _))
+                        throw new InvalidOperationException($"[MvcExpress] Scoped registration cannot be combined with a MonoBehaviour instance registration. '{logicTypes[i].FullName}' is a MonoBehaviour.");
+                }
+                for (int i = 0; i < viewTypes.Count; i++)
+                {
+                    if (_scopedTypes.TryGetValue(viewTypes[i], out _))
+                        throw new InvalidOperationException($"[MvcExpress] Scoped registration cannot be combined with a MonoBehaviour instance registration. '{viewTypes[i].FullName}' is a MonoBehaviour.");
+                }
             }
 
 #if UNITY_EDITOR
@@ -817,11 +821,9 @@ namespace mvcExpress.Internal.DependencyInjection
             }
             else if (!(obj is UnityEngine.MonoBehaviour))
             {
-                // Code-only service (not a proxy, not a scene component).
                 ServiceRegisteredForDebug?.Invoke(obj);
             }
 #endif
-
         }
 
         private void AddToListBinding(object obj, Type elementType, bool useView, bool isTransient)
@@ -1065,10 +1067,26 @@ namespace mvcExpress.Internal.DependencyInjection
         /// </summary>
         internal T Resolve<T>(object caller)
         {
+            return ResolveWithScope<T>(IsViewScope, caller);
+        }
+
+        /// <summary>
+        /// Resolves a dependency from an explicitly chosen scope, bypassing the ambient
+        /// <see cref="IsViewScope"/> flag.
+        /// </summary>
+        /// <remarks>
+        /// The ambient flag only reflects the correct scope while a <see cref="BeginViewScope"/>
+        /// window is open (i.e. during a mediator's injection + <c>OnInitialized()</c> call). Actor
+        /// APIs whose scope is fixed by the actor's type itself - a mediator is always view, a proxy
+        /// is always logic - must use this overload instead, so calls made outside that window (an
+        /// <c>OnEnable</c>, <c>Update</c>, or any other later callback) still resolve correctly.
+        /// </remarks>
+        internal T ResolveWithScope<T>(bool useViewScope, object caller = null)
+        {
             var type = typeof(T);
 
-            // 1) Try the active scope container first
-            if (TryResolveInternal(type, IsViewScope, out var value))
+            // 1) Try the requested scope container first
+            if (TryResolveInternal(type, useViewScope, out var value))
             {
                 return (T)value;
             }
@@ -1080,7 +1098,7 @@ namespace mvcExpress.Internal.DependencyInjection
             }
 
             // ERROR PATH: Build context string only when error occurs
-            var scope = IsViewScope ? "view" : "logic";
+            var scope = useViewScope ? "view" : "logic";
             var callerInfo = BuildCallerContext(caller);
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -1097,7 +1115,7 @@ namespace mvcExpress.Internal.DependencyInjection
                 $"Type '{type.FullName}' is not registered in {scope} scope (or as scoped).{callerInfo}\n\n" +
                 $"To fix this:\n" +
                 $"1. Register the type in your module's RegisterProxies() or RegisterServices() method:\n" +
-                $"   Register(new {type.Name}()).To{(IsViewScope ? "View" : "Logic")}().AsPermanent();\n" +
+                $"   Register(new {type.Name}()).To{(useViewScope ? "View" : "Logic")}().AsPermanent();\n" +
                 $"2. If this is a view-layer dependency, ensure it's registered with .ToView() or .ToViewAs<T>()\n" +
                 $"3. If this is a logic-layer dependency in a mediator, you may need to register it to both scopes:\n" +
                 $"   Register(instance).ToLogic().ToView().AsPermanent();");
@@ -1179,9 +1197,20 @@ namespace mvcExpress.Internal.DependencyInjection
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryResolve<T>(out T value)
         {
+            return TryResolveWithScope(IsViewScope, out value);
+        }
+
+        /// <summary>
+        /// Tries to resolve a dependency from an explicitly chosen scope, bypassing the ambient
+        /// <see cref="IsViewScope"/> flag. See <see cref="ResolveWithScope{T}"/> for why actor APIs
+        /// with a scope fixed by actor type need this instead of the ambient-flag overload.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal bool TryResolveWithScope<T>(bool useViewScope, out T value)
+        {
             var type = typeof(T);
 
-            if (TryResolveInternal(type, IsViewScope, out var resolved))
+            if (TryResolveInternal(type, useViewScope, out var resolved))
             {
                 value = (T)resolved;
                 return true;

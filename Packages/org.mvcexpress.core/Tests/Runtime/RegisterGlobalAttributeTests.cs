@@ -45,6 +45,23 @@ namespace mvcExpress.Tests
         public void OnCleanup() { }
     }
 
+    public interface IReadOnlyGlobalStackedThing { }
+    public interface IMeasurementGlobalStackedThing { }
+
+    [RegisterGlobal(LogicInterface = typeof(IReadOnlyGlobalStackedThing))]
+    [RegisterGlobal(LogicInterface = typeof(IMeasurementGlobalStackedThing))]
+    public class GlobalStackedInterfaceProxy : Proxy, IReadOnlyGlobalStackedThing, IMeasurementGlobalStackedThing { }
+
+    // NOT decorated with [RegisterGlobal] - unlike [Register] (module-scoped, only drained when its
+    // target module is instantiated), [RegisterGlobal] has no scoping: a decorated type is drained
+    // into EVERY MvcFacade any test creates, for the rest of the test run. A deliberately-broken
+    // global fixture (same interface stacked twice, or conflicting Lifecycle values) would hard-throw
+    // during every unrelated test's facade boot, not just its own. That guarantee is instead verified
+    // directly against AttributeGroupingUtility.ResolveGroupLifecycle in
+    // RegisterGlobalAttributeStackingBehaviourTests.cs, with zero scanning/drain side effects. This
+    // class exists only to give that direct test a labeled Type argument.
+    public class GlobalLifecycleConflictProxy : Proxy, IReadOnlyGlobalStackedThing, IMeasurementGlobalStackedThing { }
+
     public class RegisterGlobalAttributeTests
     {
         [SetUp]
@@ -202,6 +219,24 @@ namespace mvcExpress.Tests
 
             Assert.That(metadata, Has.Some.Matches<GlobalRegistrationMetadata>(item =>
                 item.ConcreteType == typeof(GlobalMockScopedProxy) && item.Lifecycle == RegistrationLifecycle.Scoped));
+        }
+
+        [Test]
+        public void ScanAssemblies_StackedRegisterGlobalAttributes_ProducesTwoMetadataEntries()
+        {
+            AttributeScanner.ScanAssemblies();
+
+            var metadata = AttributeScanner.GetGlobalRegistrationMetadata();
+            int count = 0;
+            foreach (var item in metadata)
+            {
+                if (item.ConcreteType == typeof(GlobalStackedInterfaceProxy))
+                    count++;
+            }
+
+            Assert.That(count, Is.EqualTo(2),
+                "Stacked [RegisterGlobal] attributes on one class must produce one metadata entry per " +
+                "attribute, mirroring [Register]'s ScanForRegisterAttribute (plural GetCustomAttributes).");
         }
     }
 }

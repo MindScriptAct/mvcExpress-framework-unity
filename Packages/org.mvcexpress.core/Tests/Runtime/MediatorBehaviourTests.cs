@@ -30,6 +30,31 @@ namespace mvcExpress.Tests
 
             protected override void OnInitialized() => OnInitializedCallCount++;
             protected override void OnCleanup()     => OnCleanupCallCount++;
+
+            // Lets a test probe Container.TryResolve at any point after Initialize()
+            // has run, in particular AFTER CompleteInitialization's BeginViewScope
+            // using-block has already exited (i.e. outside OnInitialized() entirely).
+            public bool TryResolveViewDependencyNow(out ViewScopeDependency value)
+            {
+                return Container.TryResolve(out value);
+            }
+        }
+
+        // Mediator whose OnEnable() probes Container.TryResolve and records the result,
+        // so a test can assert on it afterward. Unity invokes OnEnable through its own
+        // engine lifecycle (not through MediatorBehaviour.Initialize), so this reproduces
+        // real-world call sites - OnEnable, Update, coroutines, click handlers - that run
+        // outside the synchronous extent of CompleteInitialization's BeginViewScope window.
+        private class OnEnableProbeMediator : MediatorBehaviour
+        {
+            public bool? OnEnableTryResolveResult { get; private set; }
+            public ViewScopeDependency OnEnableResolvedValue { get; private set; }
+
+            private void OnEnable()
+            {
+                OnEnableTryResolveResult = Container.TryResolve<ViewScopeDependency>(out var value);
+                OnEnableResolvedValue = value;
+            }
         }
 
         // Module stub that skips Awake/OnDestroy entirely so the framework singleton
@@ -97,6 +122,77 @@ namespace mvcExpress.Tests
 
             Assert.AreSame(dep, _mediator.InjectedDep,
                 "View-scope dependency must be injected (proves BeginViewScope was entered before InjectMembers).");
+        }
+
+        [Test]
+        public void Container_TryResolve_FromOnEnable_FailsToFindViewScopeDependency_EvenThoughRegistered()
+        {
+            // Register the dependency in the VIEW partition FIRST, so the container
+            // genuinely contains it before the probe mediator's OnEnable ever runs -
+            // this isolates the scope-selection bug from an unrelated ordering/
+            // missing-registration failure.
+            var dep = new ViewScopeDependency();
+            _container.Register(dep).ToView().AsPermanent();
+
+            // Replace the SetUp-created TestMediator with a fresh, inactive GameObject
+            // so this test can control precisely when Unity invokes Awake/OnEnable:
+            // Unity defers both until SetActive(true) is called on an inactive object.
+            Object.DestroyImmediate(_go);
+            _go = new GameObject("OnEnableProbeMediator");
+            _go.SetActive(false);
+            var probe = _go.AddComponent<OnEnableProbeMediator>();
+
+            // Fully link the mediator and run CompleteInitialization - entering AND
+            // exiting BeginViewScope's using-block - before Unity ever calls Awake/
+            // OnEnable on this component for the first time. This mirrors the real
+            // Unity ordering where a mediator's GameObject is already active in a
+            // scene and OnEnable fires independently of when the framework attaches it.
+            probe.Initialize(_module, _container, _messageBus, deferOnInitialized: false);
+
+            // Unity now calls Awake then OnEnable for the first time, strictly AFTER
+            // the BeginViewScope window has already closed.
+            _go.SetActive(true);
+
+            // FAILURE SCENARIO this proves: a mediator is a view-layer actor for its
+            // whole lifetime, not just during the synchronous extent of OnInitialized().
+            // Container.TryResolve called from OnEnable should therefore still find a
+            // genuinely-registered view-scope dependency. Today it does not: the
+            // ambient IsViewScope flag has already reverted to false by the time
+            // OnEnable runs, so TryResolve silently queries the logic partition
+            // instead and reports "not found" even though the dependency exists.
+            Assert.IsTrue(probe.OnEnableTryResolveResult.GetValueOrDefault(),
+                "Container.TryResolve from OnEnable must find a genuinely-registered view-scope " +
+                "dependency. BUG: the ambient IsViewScope flag only stays true for the synchronous " +
+                "duration of CompleteInitialization's BeginViewScope block, so any later call - " +
+                "including OnEnable - silently resolves against the logic scope instead.");
+            Assert.AreSame(dep, probe.OnEnableResolvedValue,
+                "The value captured during OnEnable must be the exact instance registered in the view scope.");
+        }
+
+        [Test]
+        public void Container_TryResolve_AfterOnInitializedCompletes_FailsToFindViewScopeDependency_EvenThoughRegistered()
+        {
+            // Register the dependency in the VIEW partition before initializing, so the
+            // container genuinely contains it - isolating the scope-selection bug from
+            // an unrelated ordering/missing-registration failure.
+            var dep = new ViewScopeDependency();
+            _container.Register(dep).ToView().AsPermanent();
+
+            _mediator.Initialize(_module, _container, _messageBus, deferOnInitialized: false);
+            // CompleteInitialization's BeginViewScope using-block has already exited by
+            // the time Initialize() returns - this call happens entirely outside the
+            // window, e.g. as if made later from Update(), a coroutine, or a click handler.
+
+            bool result = _mediator.TryResolveViewDependencyNow(out var value);
+
+            Assert.IsTrue(result,
+                "Container.TryResolve, called after OnInitialized() has already returned, must still " +
+                "find a genuinely-registered view-scope dependency - a mediator remains a view-layer " +
+                "actor for its whole lifetime, not just during OnInitialized(). BUG: the ambient " +
+                "IsViewScope flag has already reverted to false by this point, so TryResolve queries " +
+                "the logic partition instead and reports \"not found\".");
+            Assert.AreSame(dep, value,
+                "The resolved value must be the exact instance registered in the view scope.");
         }
 
         [Test]

@@ -7,6 +7,7 @@ using mvcExpress.Internal.Messaging;
 using mvcExpress.Internal.Proxy;
 using mvcExpress.Internal.Services;
 using mvcExpress.Logging;
+using mvcExpress.Plugins;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -86,6 +87,11 @@ namespace mvcExpress
         // awaiting something when the module is torn down can observe cancellation on
         // its next resume instead of touching disposed module state.
         private CancellationTokenSource _lifecycleCts;
+
+        // Module extensions (e.g. mvcExpress Live) discovered on this GameObject and its
+        // children once at initialization. Null until InitializeModule runs; empty array
+        // when the module has no extensions.
+        private IMvcModuleExtension[] _extensions;
 
         internal MvcMessageBus MessageBus => _messageBus;
         internal MvcDiContainer DiContainer => _diContainer;
@@ -191,6 +197,10 @@ namespace mvcExpress
                 EnsureCoreServicesInitialized();
                 EnsureMvcContainers();
 
+                // Discover module extensions once. Children included: extension components
+                // follow the module organization convention (focused child GameObjects).
+                _extensions = GetComponentsInChildren<IMvcModuleExtension>(true);
+
                 // Ensure cached type is populated before creating ModuleInitializer
                 // This prevents null module type from being passed to AttributeScanner
                 var moduleType = ModuleType; // Force lazy initialization of cached type
@@ -205,6 +215,64 @@ namespace mvcExpress
             }
 
             _initializer.Initialize();
+        }
+
+        /// <summary>
+        /// Builds the context struct handed to module extension callbacks.
+        /// </summary>
+        private MvcModuleExtensionContext CreateExtensionContext()
+        {
+            return new MvcModuleExtensionContext(this, _messenger, _container, _messageBus);
+        }
+
+        /// <summary>
+        /// Runs OnExtensionSetup on all discovered extensions. Called by ModuleInitializer
+        /// before the Services phase. Throws propagate and fail initialization.
+        /// </summary>
+        internal void RunExtensionSetup()
+        {
+            if (_extensions == null || _extensions.Length == 0) return;
+            var context = CreateExtensionContext();
+            for (int i = 0; i < _extensions.Length; i++)
+            {
+                _extensions[i].OnExtensionSetup(context);
+            }
+        }
+
+        /// <summary>
+        /// Runs OnModuleInitialized on all discovered extensions. Called by
+        /// ModuleInitializer after FinalizeInitialization. Throws propagate.
+        /// </summary>
+        internal void RunExtensionInitialized()
+        {
+            if (_extensions == null || _extensions.Length == 0) return;
+            var context = CreateExtensionContext();
+            for (int i = 0; i < _extensions.Length; i++)
+            {
+                _extensions[i].OnModuleInitialized(context);
+            }
+        }
+
+        /// <summary>
+        /// Runs OnModuleDestroy on all discovered extensions. Teardown is resilient:
+        /// one throwing extension does not prevent the others (or core cleanup) from running.
+        /// </summary>
+        private void RunExtensionDestroy()
+        {
+            if (_extensions == null || _extensions.Length == 0) return;
+            for (int i = 0; i < _extensions.Length; i++)
+            {
+                try
+                {
+                    _extensions[i].OnModuleDestroy();
+                }
+                catch (Exception ex)
+                {
+                    MvcDebug.LogError(
+                        $"Module extension '{_extensions[i].GetType().Name}' threw during OnModuleDestroy: {ex}");
+                }
+            }
+            _extensions = null;
         }
 
         /// <summary>
@@ -527,6 +595,8 @@ namespace mvcExpress
             _lifecycleCts?.Cancel();
             _lifecycleCts?.Dispose();
             _lifecycleCts = null;
+
+            RunExtensionDestroy();
 
             if (_initializer != null)
             {

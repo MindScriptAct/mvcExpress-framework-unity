@@ -30,7 +30,7 @@ namespace mvcExpress
     /// on the main thread before game logic runs.
     /// </para>
     /// </remarks>
-    public sealed class MvcFacade : MonoBehaviour
+    public class MvcFacade : MonoBehaviour
     {
         private static MvcFacade _facadeInstance; // single live instance; null before first module Awake or after final destroy
         private static bool _isQuitting;        // set in OnApplicationQuit to prevent new-instance creation during teardown
@@ -147,6 +147,43 @@ namespace mvcExpress
 
         // Holds all globally-registered services and proxies; accessible to every module's actors.
         private readonly MvcDiContainer _globalContainer = new MvcDiContainer();
+
+        /// <summary>
+        /// Registration/resolution access to the global container, for use from
+        /// <see cref="RegisterGlobalServices"/> and <see cref="RegisterGlobalProxies"/> overrides.
+        /// </summary>
+        protected FacadeGlobalContainerApi GlobalDependencies => default;
+
+        /// <summary>
+        /// Override to register long-lived, application-wide services using
+        /// <see cref="GlobalDependencies"/>. Subclass <see cref="MvcFacade"/> and place the
+        /// subclass on the scene's facade GameObject to use this.
+        /// </summary>
+        /// <remarks>
+        /// Runs once, inside <c>InitializeIfNeeded</c>, before any <see cref="MvcModule"/> has
+        /// registered with the facade - so every module can resolve these dependencies from its
+        /// very first initialization phase with no race condition. Runs after the Inspector-driven
+        /// Global Services registry and the <c>[RegisterGlobal]</c> attribute drain, so this
+        /// override wins on conflict for the same type - matching the Inspector -> Attribute -> Code
+        /// precedence used by <see cref="MvcModule"/>'s own initialization pipeline.
+        /// </remarks>
+        protected virtual void RegisterGlobalServices() { }
+
+        /// <summary>
+        /// Override to register application-wide model/state proxies using
+        /// <see cref="GlobalDependencies"/>. Subclass <see cref="MvcFacade"/> and place the
+        /// subclass on the scene's facade GameObject to use this.
+        /// </summary>
+        /// <remarks>
+        /// Runs once, inside <c>InitializeIfNeeded</c>, after <see cref="RegisterGlobalServices"/>
+        /// and before any <see cref="MvcModule"/> has registered with the facade - so every module
+        /// can resolve these dependencies from its very first initialization phase with no race
+        /// condition. Runs after the Inspector-driven Global Proxies registry and the
+        /// <c>[RegisterGlobal]</c> attribute drain, so this override wins on conflict for the same
+        /// type - matching the Inspector -> Attribute -> Code precedence used by
+        /// <see cref="MvcModule"/>'s own initialization pipeline.
+        /// </remarks>
+        protected virtual void RegisterGlobalProxies() { }
 
         // Forces facade creation if not yet alive. Use GlobalContainerOrNull in teardown paths.
         internal static MvcDiContainer Global => FacadeInstance._globalContainer;
@@ -452,12 +489,19 @@ namespace mvcExpress
 #endif
 
             // Drain [RegisterGlobal] attribute entries into the global container after the
-            // Inspector-driven registries have been processed (Unity style takes precedence).
+            // Inspector-driven registries have been processed.
 #if MVC_EXPRESS_NO_ATTRIBUTE
             // Attribute style disabled via Project Settings > mvcExpress > Composition.
 #else
             DrainAttributeGlobalRegistrations();
 #endif
+
+            // Code-override hook: subclasses register application-wide dependencies here, before
+            // any module has registered with the facade, so there is no race condition. Runs last
+            // so code registrations win over Inspector/attribute ones for the same type - matching
+            // the Inspector -> Attribute -> Code order used by MvcModule's initialization pipeline.
+            RegisterGlobalServices();
+            RegisterGlobalProxies();
 
             _initialized = true;
         }
@@ -1053,138 +1097,21 @@ namespace mvcExpress
             var pendingProxyBehaviours = new List<ProxyBehaviour>(entries.Count);
             var pendingObjects = new List<object>(entries.Count);
 
+            // Group stacked [RegisterGlobal] attributes on the same class so they share ONE
+            // instance registered under every requested logic/view type, instead of one instance
+            // (and one container registration) per attribute.
+            var groups = new Dictionary<Type, List<mvcExpress.Internal.Initialization.GlobalRegistrationMetadata>>();
             for (int i = 0; i < entries.Count; i++)
             {
                 var meta = entries[i];
+                if (!groups.TryGetValue(meta.ConcreteType, out var group))
+                    groups[meta.ConcreteType] = group = new List<mvcExpress.Internal.Initialization.GlobalRegistrationMetadata>();
+                group.Add(meta);
+            }
 
-                MvcCompositionStyleWarning.WarnIfDisabled(
-                    MvcCompositionStyle.Attribute,
-                    $"[RegisterGlobal] global registration of '{meta.ConcreteType.Name}'");
-
-                object instance;
-
-                if (meta.IsMonoBehaviour)
-                {
-                    var parentContainer = meta.IsProxy ? _globalProxyRegistry.transform : _globalServiceRegistry.transform;
-
-                    // Prefer an instance already tracked via Unity registry (Inspector-wired).
-                    MonoBehaviour preTracked = null;
-                    if (meta.IsProxy)
-                    {
-                        var proxyMappings = _globalProxyRegistry.ProxyMappings;
-                        for (int m = 0; m < proxyMappings.Length; m++)
-                        {
-                            var p = proxyMappings[m]?.Proxy;
-                            if (p != null && p.GetType() == meta.ConcreteType) { preTracked = p; break; }
-                        }
-                    }
-                    else
-                    {
-                        var serviceMappings = _globalServiceRegistry.ServiceMappings;
-                        for (int m = 0; m < serviceMappings.Length; m++)
-                        {
-                            var s = serviceMappings[m]?.Service;
-                            if (s != null && s.GetType() == meta.ConcreteType) { preTracked = s; break; }
-                        }
-                    }
-
-                    // Not tracked: find a hand-placed instance anywhere under the facade, or create
-                    // one under the Global Proxies/Global Services container if none exists.
-                    var resolution = mvcExpress.Internal.Initialization.AttributeMonoBehaviourResolver.Resolve(
-                        transform, meta.ConcreteType, parentContainer, preTracked);
-
-                    if (resolution.Kind == mvcExpress.Internal.Initialization.MonoBehaviourResolutionKind.Ambiguous)
-                    {
-                        MvcDebug.LogError(
-                            $"[RegisterGlobal] Type '{meta.ConcreteType.FullName}' has {resolution.Conflicts.Length} " +
-                            $"instances in the MvcFacade hierarchy: " +
-                            $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
-                            $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
-                        continue;
-                    }
-
-#if UNITY_EDITOR || MVC_LOGGING
-                    if (resolution.Kind == mvcExpress.Internal.Initialization.MonoBehaviourResolutionKind.Created)
-                    {
-                        MvcDebug.Log(
-                            $"[RegisterGlobal] Auto-created '{meta.ConcreteType.Name}' under " +
-                            $"{(meta.IsProxy ? "Global Proxies" : "Global Services")} container.");
-                    }
-#endif
-
-                    instance = resolution.Instance;
-                }
-                else
-                {
-                    try
-                    {
-                        instance = Activator.CreateInstance(meta.ConcreteType);
-                    }
-                    catch (Exception ex)
-                    {
-                        MvcDebug.LogError(
-                            $"[RegisterGlobal] Failed to create instance of '{meta.ConcreteType.FullName}': {ex.Message}");
-                        continue;
-                    }
-                }
-
-                bool isScoped = meta.Lifecycle == RegistrationLifecycle.Scoped;
-
-                try
-                {
-                    var builder = _globalContainer.Register(instance, meta.ConcreteType);
-
-                    if (meta.RegisterToLogic)
-                    {
-                        if (meta.LogicType == meta.ConcreteType)
-                            builder.ToLogic();
-                        else
-                            builder.ToLogicAs(meta.LogicType);
-                    }
-
-                    if (meta.RegisterToView)
-                    {
-                        if (meta.ViewType == meta.ConcreteType)
-                            builder.ToView();
-                        else
-                            builder.ToViewAs(meta.ViewType);
-                    }
-
-                    if (isScoped)
-                        builder.AsScoped();
-                    else if (meta.Lifecycle == RegistrationLifecycle.Transient)
-                        builder.AsTransient();
-                    else
-                        builder.AsPermanent();
-                }
-                catch (Exception ex)
-                {
-                    MvcDebug.LogError(
-                        $"[RegisterGlobal] Failed to register '{meta.ConcreteType.FullName}' into global container: {ex.Message}");
-                    continue;
-                }
-
-                // Scoped: 'instance' was a throwaway created only to walk the builder above - the
-                // container discarded it and will construct its own per resolution scope. Skip
-                // deferred initialization entirely; there is nothing valid left to initialize.
-                if (isScoped)
-                    continue;
-
-                // Defer initialization so all global registrations are visible to injection.
-                if (meta.IsProxy && instance is Proxy proxy)
-                {
-                    proxy.Initialize(meta.ConcreteType, _messageBus, _globalContainer, deferOnInitialized: true);
-                    pendingProxies.Add(proxy);
-                }
-                else if (meta.IsProxy && instance is ProxyBehaviour proxyBehaviour)
-                {
-                    proxyBehaviour.InitializeGlobal(_globalContainer, _messageBus, deferOnInitialized: true);
-                    pendingProxyBehaviours.Add(proxyBehaviour);
-                }
-                else
-                {
-                    pendingObjects.Add(instance);
-                }
+            foreach (var group in groups.Values)
+            {
+                DrainAttributeGlobalRegistrationGroup(group, pendingProxies, pendingProxyBehaviours, pendingObjects);
             }
 
             // Complete deferred initialization in the same order as registration.
@@ -1206,6 +1133,157 @@ namespace mvcExpress
 
                 if (pendingObjects[i] is IMvcLifecycle lifecycle)
                     lifecycle.OnInitialized();
+            }
+        }
+
+        // Resolves/creates one instance for a group of stacked [RegisterGlobal] attributes sharing
+        // the same concrete type, registers it into the global container under every requested
+        // logic/view type across the whole group, and queues it for deferred initialization.
+        private void DrainAttributeGlobalRegistrationGroup(
+            List<mvcExpress.Internal.Initialization.GlobalRegistrationMetadata> group,
+            List<Proxy> pendingProxies,
+            List<ProxyBehaviour> pendingProxyBehaviours,
+            List<object> pendingObjects)
+        {
+            var meta0 = group[0];
+            var concreteType = meta0.ConcreteType;
+
+            MvcCompositionStyleWarning.WarnIfDisabled(
+                MvcCompositionStyle.Attribute,
+                $"[RegisterGlobal] global registration of '{concreteType.Name}'");
+
+            object instance;
+
+            if (meta0.IsMonoBehaviour)
+            {
+                var parentContainer = meta0.IsProxy ? _globalProxyRegistry.transform : _globalServiceRegistry.transform;
+
+                // Prefer an instance already tracked via Unity registry (Inspector-wired).
+                MonoBehaviour preTracked = null;
+                if (meta0.IsProxy)
+                {
+                    var proxyMappings = _globalProxyRegistry.ProxyMappings;
+                    for (int m = 0; m < proxyMappings.Length; m++)
+                    {
+                        var p = proxyMappings[m]?.Proxy;
+                        if (p != null && p.GetType() == concreteType) { preTracked = p; break; }
+                    }
+                }
+                else
+                {
+                    var serviceMappings = _globalServiceRegistry.ServiceMappings;
+                    for (int m = 0; m < serviceMappings.Length; m++)
+                    {
+                        var s = serviceMappings[m]?.Service;
+                        if (s != null && s.GetType() == concreteType) { preTracked = s; break; }
+                    }
+                }
+
+                // Not tracked: find a hand-placed instance anywhere under the facade, or create
+                // one under the Global Proxies/Global Services container if none exists.
+                var resolution = mvcExpress.Internal.Initialization.AttributeMonoBehaviourResolver.Resolve(
+                    transform, concreteType, parentContainer, preTracked);
+
+                if (resolution.Kind == mvcExpress.Internal.Initialization.MonoBehaviourResolutionKind.Ambiguous)
+                {
+                    MvcDebug.LogError(
+                        $"[RegisterGlobal] Type '{concreteType.FullName}' has {resolution.Conflicts.Length} " +
+                        $"instances in the MvcFacade hierarchy: " +
+                        $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
+                        $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
+                    return;
+                }
+
+#if UNITY_EDITOR || MVC_LOGGING
+                if (resolution.Kind == mvcExpress.Internal.Initialization.MonoBehaviourResolutionKind.Created)
+                {
+                    MvcDebug.Log(
+                        $"[RegisterGlobal] Auto-created '{concreteType.Name}' under " +
+                        $"{(meta0.IsProxy ? "Global Proxies" : "Global Services")} container.");
+                }
+#endif
+
+                instance = resolution.Instance;
+            }
+            else
+            {
+                try
+                {
+                    instance = Activator.CreateInstance(concreteType);
+                }
+                catch (Exception ex)
+                {
+                    MvcDebug.LogError(
+                        $"[RegisterGlobal] Failed to create instance of '{concreteType.FullName}': {ex.Message}");
+                    return;
+                }
+            }
+
+            // Intentionally unwrapped - lifecycle conflicts must hard-throw (configuration bug),
+            // unlike the surrounding soft-skip failure modes (missing instance, ambiguous
+            // MonoBehaviour, etc.).
+            var lifecycles = group.ConvertAll(m => m.Lifecycle);
+            var lifecycle = mvcExpress.Internal.Initialization.AttributeGroupingUtility.ResolveGroupLifecycle(
+                concreteType, lifecycles, "RegisterGlobal");
+            bool isScoped = lifecycle == RegistrationLifecycle.Scoped;
+
+            try
+            {
+                var builder = _globalContainer.Register(instance, concreteType);
+
+                foreach (var meta in group)
+                {
+                    if (meta.RegisterToLogic)
+                    {
+                        if (meta.LogicType == concreteType)
+                            builder.ToLogic();
+                        else
+                            builder.ToLogicAs(meta.LogicType);
+                    }
+
+                    if (meta.RegisterToView)
+                    {
+                        if (meta.ViewType == concreteType)
+                            builder.ToView();
+                        else
+                            builder.ToViewAs(meta.ViewType);
+                    }
+                }
+
+                if (isScoped)
+                    builder.AsScoped();
+                else if (lifecycle == RegistrationLifecycle.Transient)
+                    builder.AsTransient();
+                else
+                    builder.AsPermanent();
+            }
+            catch (Exception ex)
+            {
+                MvcDebug.LogError(
+                    $"[RegisterGlobal] Failed to register '{concreteType.FullName}' into global container: {ex.Message}");
+                return;
+            }
+
+            // Scoped: 'instance' was a throwaway created only to walk the builder above - the
+            // container discarded it and will construct its own per resolution scope. Skip
+            // deferred initialization entirely; there is nothing valid left to initialize.
+            if (isScoped)
+                return;
+
+            // Defer initialization so all global registrations are visible to injection.
+            if (meta0.IsProxy && instance is Proxy proxy)
+            {
+                proxy.Initialize(concreteType, _messageBus, _globalContainer, deferOnInitialized: true);
+                pendingProxies.Add(proxy);
+            }
+            else if (meta0.IsProxy && instance is ProxyBehaviour proxyBehaviour)
+            {
+                proxyBehaviour.InitializeGlobal(_globalContainer, _messageBus, deferOnInitialized: true);
+                pendingProxyBehaviours.Add(proxyBehaviour);
+            }
+            else
+            {
+                pendingObjects.Add(instance);
             }
         }
 

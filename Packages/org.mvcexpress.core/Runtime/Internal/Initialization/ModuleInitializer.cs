@@ -214,6 +214,10 @@ namespace mvcExpress.Internal.Initialization
                 TransitionToPhase(InitializationPhase.CoreServices);
                 InitializeCoreServices();
 
+                // Module extensions set up their state before the Services phase so
+                // extension-provided instances are injectable into all later phases.
+                _moduleContext.RunExtensionSetup();
+
                 // Phase 2: Services Layer
                 TransitionToPhase(InitializationPhase.Services);
                 InitializeServices();
@@ -235,6 +239,10 @@ namespace mvcExpress.Internal.Initialization
 
                 // User hook
                 FinalizeInitialization();
+
+                // Extensions finish wiring after the module's own OnInitialized hook:
+                // Messenger and DI are fully ready, subscriptions are valid.
+                _moduleContext.RunExtensionInitialized();
 
 #if UNITY_EDITOR || MVC_LOGGING
                 // LOG: Module initialization completed
@@ -509,7 +517,6 @@ namespace mvcExpress.Internal.Initialization
 #if MVC_EXPRESS_NO_ATTRIBUTE
             return;
 #else
-            // Get cached proxy metadata for this module
             var proxyMetadata = AttributeScanner.GetProxyMetadata(_moduleType);
 
             if (proxyMetadata.Count == 0)
@@ -519,170 +526,178 @@ namespace mvcExpress.Internal.Initialization
                 MvcCompositionStyle.Attribute,
                 $"[Register] proxy metadata for module '{_moduleType.Name}'");
 
-            // Get ProxyBehaviours tracked from Unity registry
             var trackedProxies = _proxyRegistrar.GetTrackedProxyBehaviours();
 
+            // Group stacked [Register] attributes on the same class so they share ONE instance
+            // registered under every requested logic/view type, instead of one instance per attribute.
+            var groups = new Dictionary<Type, List<ProxyRegistrationMetadata>>();
             foreach (var metadata in proxyMetadata)
             {
-                object proxyInstance = null;
+                if (!groups.TryGetValue(metadata.ProxyType, out var group))
+                    groups[metadata.ProxyType] = group = new List<ProxyRegistrationMetadata>();
+                group.Add(metadata);
+            }
 
-                // Check if this is a ProxyBehaviour (MonoBehaviour)
-                if (typeof(ProxyBehaviour).IsAssignableFrom(metadata.ProxyType))
-                {
-                    // Prefer an instance already tracked via Unity registry (Inspector-wired).
-                    ProxyBehaviour preTracked = null;
-                    if (trackedProxies != null)
-                    {
-                        foreach (var tracked in trackedProxies)
-                        {
-                            if (tracked != null && tracked.GetType() == metadata.ProxyType)
-                            {
-                                preTracked = tracked;
-                                break;
-                            }
-                        }
-                    }
-
-                    // Not tracked: find a hand-placed instance anywhere in the module hierarchy,
-                    // or create one under the Model container if none exists.
-                    var resolution = AttributeMonoBehaviourResolver.Resolve(
-                        _moduleContext.transform,
-                        metadata.ProxyType,
-                        _moduleContext.ModelContainer,
-                        preTracked);
-
-                    if (resolution.Kind == MonoBehaviourResolutionKind.Ambiguous)
-                    {
-                        MvcDebug.LogError(
-                            $"Proxy '{metadata.ProxyType.FullName}' has [Register] attribute but " +
-                            $"{resolution.Conflicts.Length} instances exist in module '{_moduleType}''s hierarchy: " +
-                            $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
-                            $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
-                        continue;
-                    }
-
-                    proxyInstance = resolution.Instance;
-
-#if UNITY_EDITOR || MVC_LOGGING
-                    if (resolution.Kind == MonoBehaviourResolutionKind.Created)
-                    {
-                        MvcDebug.Log(
-                            $"[Register] Auto-created '{metadata.ProxyType.Name}' under Model container (module '{_moduleType}').");
-                    }
+            foreach (var group in groups.Values)
+            {
+                RegisterAttributeProxyGroup(group, trackedProxies);
+            }
 #endif
-                }
-                else if (typeof(mvcExpress.Proxy).IsAssignableFrom(metadata.ProxyType))
+        }
+
+#if !MVC_EXPRESS_NO_ATTRIBUTE
+        private void RegisterAttributeProxyGroup(
+            List<ProxyRegistrationMetadata> group,
+            System.Collections.Generic.IReadOnlyList<ProxyBehaviour> trackedProxies)
+        {
+            var proxyType = group[0].ProxyType;
+            object proxyInstance = null;
+
+            if (typeof(ProxyBehaviour).IsAssignableFrom(proxyType))
+            {
+                ProxyBehaviour preTracked = null;
+                if (trackedProxies != null)
                 {
-                    // Code-only Proxy: Create instance
-                    try
+                    foreach (var tracked in trackedProxies)
                     {
-                        proxyInstance = Activator.CreateInstance(metadata.ProxyType);
-                        
-                        if (proxyInstance == null)
+                        if (tracked != null && tracked.GetType() == proxyType)
                         {
-                            MvcDebug.LogError(
-                                $"Failed to create instance of proxy '{metadata.ProxyType.FullName}' " +
-                                $"in module '{_moduleType}'. Skipping registration.");
-                            continue;
+                            preTracked = tracked;
+                            break;
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        MvcDebug.LogError(
-                            $"Failed to create instance of proxy '{metadata.ProxyType.FullName}' " +
-                            $"in module '{_moduleType}': {ex.Message}");
-                        continue;
-                    }
                 }
-                else
+
+                var resolution = AttributeMonoBehaviourResolver.Resolve(
+                    _moduleContext.transform,
+                    proxyType,
+                    _moduleContext.ModelContainer,
+                    preTracked);
+
+                if (resolution.Kind == MonoBehaviourResolutionKind.Ambiguous)
                 {
                     MvcDebug.LogError(
-                        $"Type '{metadata.ProxyType.FullName}' has [Register] attribute but is not a Proxy or ProxyBehaviour. " +
-                        $"Skipping registration for module '{_moduleType}'.");
-                    continue;
+                        $"Proxy '{proxyType.FullName}' has [Register] attribute but " +
+                        $"{resolution.Conflicts.Length} instances exist in module '{_moduleType}''s hierarchy: " +
+                        $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
+                        $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
+                    return;
                 }
 
-                try
-                {
-                    if (proxyInstance is ProxyBehaviour proxyBehaviour)
-                    {
-                        // Use ProxyRegistrationHelper for ProxyBehaviour types
-                        ProxyRegistrationHelper.RegisterProxyWithScopes(
-                            _diContainer,
-                            proxyBehaviour,
-                            metadata.LogicType,
-                            metadata.ViewType,
-                            metadata.RegisterToLogic,
-                            metadata.RegisterToView,
-                            metadata.Lifecycle == RegistrationLifecycle.Transient);
-
-                        // Track for CompleteProxyInitialization (no-op if already tracked, e.g. preTracked instances).
-                        _proxyRegistrar.TrackProxyBehaviour(proxyBehaviour);
-
-                        // Track for source detection
-                        _attributeRegisteredProxies.Add(proxyBehaviour);
-                    }
-                    else if (proxyInstance is mvcExpress.Proxy codeProxy)
-                    {
-                        // Use non-generic fluent API for code-only proxies
-                        var builder = _diContainer.Register(proxyInstance, metadata.ProxyType);
-
-                        if (metadata.RegisterToLogic)
-                        {
-                            if (metadata.LogicType == metadata.ProxyType)
-                                builder.ToLogic();
-                            else
-                                builder.ToLogicAs(metadata.LogicType);
-                        }
-
-                        if (metadata.RegisterToView)
-                        {
-                            if (metadata.ViewType == metadata.ProxyType)
-                                builder.ToView();
-                            else
-                                builder.ToViewAs(metadata.ViewType);
-                        }
-
-                        if (metadata.Lifecycle == RegistrationLifecycle.Scoped)
-                        {
-                            builder.AsScoped();
-                            // codeProxy is a throwaway instance discarded by AsScoped() - the container
-                            // builds its own instance per resolution scope. Do NOT track/initialize it.
-                        }
-                        else
-                        {
-                            if (metadata.Lifecycle == RegistrationLifecycle.Transient)
-                                builder.AsTransient();
-                            else
-                                builder.AsPermanent();
-
-                            // Track code-only proxy for initialization
-                            _proxyRegistrar.TrackCodeProxy(codeProxy);
-
-                            // Track for source detection
-                            _attributeRegisteredProxies.Add(codeProxy);
-                        }
-                    }
+                proxyInstance = resolution.Instance;
 
 #if UNITY_EDITOR || MVC_LOGGING
-                    // LOG: Proxy registered via attribute
-                    mvcExpress.Logging.MvcLogInternal.LogProxyRegistered(
-                        metadata.ProxyType.Name,
-                        _moduleContext,
-                        mvcExpress.Logging.MvcLogContext.RegistrationSource.Attribute,
-                        proxyInstance is UnityEngine.Object uo ? (uo as Component)?.gameObject : null,
-                        null, 0);
-                    MvcPluginBus.FireProxyRegistered(metadata.ProxyType, _moduleType, mvcExpress.Logging.MvcLogContext.RegistrationSource.Attribute);
+                if (resolution.Kind == MonoBehaviourResolutionKind.Created)
+                {
+                    MvcDebug.Log(
+                        $"[Register] Auto-created '{proxyType.Name}' under Model container (module '{_moduleType}').");
+                }
 #endif
+            }
+            else if (typeof(mvcExpress.Proxy).IsAssignableFrom(proxyType))
+            {
+                try
+                {
+                    proxyInstance = Activator.CreateInstance(proxyType);
+                    if (proxyInstance == null)
+                    {
+                        MvcDebug.LogError(
+                            $"Failed to create instance of proxy '{proxyType.FullName}' " +
+                            $"in module '{_moduleType}'. Skipping registration.");
+                        return;
+                    }
                 }
                 catch (Exception ex)
                 {
                     MvcDebug.LogError(
-                        $"Failed to register proxy '{metadata.ProxyType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+                        $"Failed to create instance of proxy '{proxyType.FullName}' " +
+                        $"in module '{_moduleType}': {ex.Message}");
+                    return;
                 }
             }
+            else
+            {
+                MvcDebug.LogError(
+                    $"Type '{proxyType.FullName}' has [Register] attribute but is not a Proxy or ProxyBehaviour. " +
+                    $"Skipping registration for module '{_moduleType}'.");
+                return;
+            }
+
+            // Intentionally unwrapped - lifecycle conflicts must hard-throw (configuration bug), unlike the
+            // surrounding soft-skip failure modes (missing instance, ambiguous MonoBehaviour, etc.).
+            var lifecycles = group.ConvertAll(m => m.Lifecycle);
+            var lifecycle = AttributeGroupingUtility.ResolveGroupLifecycle(proxyType, lifecycles, "Register");
+
+            try
+            {
+                var builder = _diContainer.Register(proxyInstance, proxyType);
+
+                foreach (var metadata in group)
+                {
+                    if (metadata.RegisterToLogic)
+                    {
+                        if (metadata.LogicType == metadata.ProxyType)
+                            builder.ToLogic();
+                        else
+                            builder.ToLogicAs(metadata.LogicType);
+                    }
+
+                    if (metadata.RegisterToView)
+                    {
+                        if (metadata.ViewType == metadata.ProxyType)
+                            builder.ToView();
+                        else
+                            builder.ToViewAs(metadata.ViewType);
+                    }
+                }
+
+                if (proxyInstance is ProxyBehaviour proxyBehaviour)
+                {
+                    if (lifecycle == RegistrationLifecycle.Transient)
+                        builder.AsTransient();
+                    else
+                        builder.AsPermanent();
+
+                    _proxyRegistrar.TrackProxyBehaviour(proxyBehaviour);
+                    _attributeRegisteredProxies.Add(proxyBehaviour);
+                }
+                else if (proxyInstance is mvcExpress.Proxy codeProxy)
+                {
+                    if (lifecycle == RegistrationLifecycle.Scoped)
+                    {
+                        builder.AsScoped();
+                        // codeProxy is a throwaway instance discarded by AsScoped() - the container
+                        // builds its own instance per resolution scope. Do NOT track/initialize it.
+                    }
+                    else
+                    {
+                        if (lifecycle == RegistrationLifecycle.Transient)
+                            builder.AsTransient();
+                        else
+                            builder.AsPermanent();
+
+                        _proxyRegistrar.TrackCodeProxy(codeProxy);
+                        _attributeRegisteredProxies.Add(codeProxy);
+                    }
+                }
+
+#if UNITY_EDITOR || MVC_LOGGING
+                mvcExpress.Logging.MvcLogInternal.LogProxyRegistered(
+                    proxyType.Name,
+                    _moduleContext,
+                    mvcExpress.Logging.MvcLogContext.RegistrationSource.Attribute,
+                    proxyInstance is UnityEngine.Object uo ? (uo as Component)?.gameObject : null,
+                    null, 0);
+                MvcPluginBus.FireProxyRegistered(proxyType, _moduleType, mvcExpress.Logging.MvcLogContext.RegistrationSource.Attribute);
 #endif
+            }
+            catch (Exception ex)
+            {
+                MvcDebug.LogError(
+                    $"Failed to register proxy '{proxyType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+            }
         }
+#endif
 
         /// <summary>
         /// Register services marked with [Register] attribute.
@@ -693,7 +708,6 @@ namespace mvcExpress.Internal.Initialization
 #if MVC_EXPRESS_NO_ATTRIBUTE
             return;
 #else
-            // Get cached service metadata for this module
             var serviceMetadata = AttributeScanner.GetServiceMetadata(_moduleType);
 
             if (serviceMetadata.Count == 0)
@@ -703,72 +717,110 @@ namespace mvcExpress.Internal.Initialization
                 MvcCompositionStyle.Attribute,
                 $"[Register] service metadata for module '{_moduleType.Name}'");
 
+            var groups = new Dictionary<Type, List<ServiceRegistrationMetadata>>();
             foreach (var metadata in serviceMetadata)
+            {
+                if (!groups.TryGetValue(metadata.ServiceType, out var group))
+                    groups[metadata.ServiceType] = group = new List<ServiceRegistrationMetadata>();
+                group.Add(metadata);
+            }
+
+            foreach (var group in groups.Values)
+            {
+                RegisterAttributeServiceGroup(group);
+            }
+#endif
+        }
+
+#if !MVC_EXPRESS_NO_ATTRIBUTE
+        private void RegisterAttributeServiceGroup(List<ServiceRegistrationMetadata> group)
+        {
+            var serviceType = group[0].ServiceType;
+            object serviceInstance;
+
+            if (typeof(UnityEngine.MonoBehaviour).IsAssignableFrom(serviceType))
             {
                 try
                 {
-                    object serviceInstance = null;
-
-                    if (typeof(UnityEngine.MonoBehaviour).IsAssignableFrom(metadata.ServiceType))
+                    UnityEngine.MonoBehaviour preTracked = null;
+                    var mappings = _moduleContext.GetServiceMappings();
+                    for (int i = 0; i < mappings.Length; i++)
                     {
-                        // Prefer an instance already tracked via Unity registry (Inspector-wired).
-                        UnityEngine.MonoBehaviour preTracked = null;
-                        var mappings = _moduleContext.GetServiceMappings();
-                        for (int i = 0; i < mappings.Length; i++)
+                        var svc = mappings[i]?.Service;
+                        if (svc != null && svc.GetType() == serviceType)
                         {
-                            var svc = mappings[i]?.Service;
-                            if (svc != null && svc.GetType() == metadata.ServiceType)
-                            {
-                                preTracked = svc;
-                                break;
-                            }
+                            preTracked = svc;
+                            break;
                         }
-
-                        // Not tracked: find a hand-placed instance anywhere in the module hierarchy,
-                        // or create one under the Services container if none exists.
-                        var resolution = AttributeMonoBehaviourResolver.Resolve(
-                            _moduleContext.transform,
-                            metadata.ServiceType,
-                            _moduleContext.ServicesContainer,
-                            preTracked);
-
-                        if (resolution.Kind == MonoBehaviourResolutionKind.Ambiguous)
-                        {
-                            MvcDebug.LogError(
-                                $"Service '{metadata.ServiceType.FullName}' has [Register] attribute but " +
-                                $"{resolution.Conflicts.Length} instances exist in module '{_moduleType}''s hierarchy: " +
-                                $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
-                                $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
-                            continue;
-                        }
-
-#if UNITY_EDITOR || MVC_LOGGING
-                        if (resolution.Kind == MonoBehaviourResolutionKind.Created)
-                        {
-                            MvcDebug.Log(
-                                $"[Register] Auto-created '{metadata.ServiceType.Name}' under Services container (module '{_moduleType}').");
-                        }
-#endif
-
-                        serviceInstance = resolution.Instance;
-                    }
-                    else
-                    {
-                        // Create code-only service instance
-                        serviceInstance = Activator.CreateInstance(metadata.ServiceType);
                     }
 
-                    if (serviceInstance == null)
+                    var resolution = AttributeMonoBehaviourResolver.Resolve(
+                        _moduleContext.transform,
+                        serviceType,
+                        _moduleContext.ServicesContainer,
+                        preTracked);
+
+                    if (resolution.Kind == MonoBehaviourResolutionKind.Ambiguous)
                     {
                         MvcDebug.LogError(
-                            $"Failed to create instance of service '{metadata.ServiceType.FullName}' " +
-                            $"in module '{_moduleType}'. Skipping registration.");
-                        continue;
+                            $"Service '{serviceType.FullName}' has [Register] attribute but " +
+                            $"{resolution.Conflicts.Length} instances exist in module '{_moduleType}''s hierarchy: " +
+                            $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
+                            $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
+                        return;
                     }
 
-                    // Register using fluent API
-                    var builder = _diContainer.Register(serviceInstance, metadata.ServiceType);
+#if UNITY_EDITOR || MVC_LOGGING
+                    if (resolution.Kind == MonoBehaviourResolutionKind.Created)
+                    {
+                        MvcDebug.Log(
+                            $"[Register] Auto-created '{serviceType.Name}' under Services container (module '{_moduleType}').");
+                    }
+#endif
 
+                    serviceInstance = resolution.Instance;
+                }
+                catch (Exception ex)
+                {
+                    MvcDebug.LogError(
+                        $"Failed to register service '{serviceType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+                    return;
+                }
+            }
+            else
+            {
+                try
+                {
+                    serviceInstance = Activator.CreateInstance(serviceType);
+                }
+                catch (Exception ex)
+                {
+                    MvcDebug.LogError(
+                        $"Failed to create instance of service '{serviceType.FullName}' " +
+                        $"in module '{_moduleType}': {ex.Message}");
+                    return;
+                }
+            }
+
+            if (serviceInstance == null)
+            {
+                MvcDebug.LogError(
+                    $"Failed to create instance of service '{serviceType.FullName}' " +
+                    $"in module '{_moduleType}'. Skipping registration.");
+                return;
+            }
+
+            // Intentionally unwrapped - lifecycle conflicts must hard-throw (configuration bug), unlike the
+            // surrounding soft-skip failure modes (missing instance, ambiguous MonoBehaviour, etc.).
+            var lifecycles = group.ConvertAll(m => m.Lifecycle);
+            var lifecycle = AttributeGroupingUtility.ResolveGroupLifecycle(serviceType, lifecycles, "Register");
+
+            try
+            {
+                var builder = _diContainer.Register(serviceInstance, serviceType);
+
+                foreach (var metadata in group)
+                {
                     if (metadata.RegisterToLogic)
                     {
                         if (metadata.LogicType == metadata.ServiceType)
@@ -784,43 +836,39 @@ namespace mvcExpress.Internal.Initialization
                         else
                             builder.ToViewAs(metadata.ViewType);
                     }
+                }
 
-                    if (metadata.Lifecycle == RegistrationLifecycle.Scoped)
-                    {
-                        builder.AsScoped();
-                        // serviceInstance is a throwaway instance discarded by AsScoped() - the container
-                        // builds its own instance per resolution scope. Do NOT track it for initialization.
-                    }
+                if (lifecycle == RegistrationLifecycle.Scoped)
+                {
+                    builder.AsScoped();
+                }
+                else
+                {
+                    if (lifecycle == RegistrationLifecycle.Transient)
+                        builder.AsTransient();
                     else
-                    {
-                        if (metadata.Lifecycle == RegistrationLifecycle.Transient)
-                            builder.AsTransient();
-                        else
-                            builder.AsPermanent();
+                        builder.AsPermanent();
 
-                        // Track this service for separate initialization (step 5)
-                        _attributeRegisteredServices.Add(serviceInstance);
-                    }
+                    _attributeRegisteredServices.Add(serviceInstance);
+                }
 
 #if UNITY_EDITOR || MVC_LOGGING
-                    // LOG: Service registered via attribute
-                    mvcExpress.Logging.MvcLogInternal.LogServiceRegistered(
-                        metadata.ServiceType.Name,
-                        _moduleContext,
-                        mvcExpress.Logging.MvcLogContext.RegistrationSource.Attribute,
-                        null,
-                        null, 0);
-                    MvcPluginBus.FireServiceRegistered(metadata.ServiceType, _moduleType, mvcExpress.Logging.MvcLogContext.RegistrationSource.Attribute);
+                mvcExpress.Logging.MvcLogInternal.LogServiceRegistered(
+                    serviceType.Name,
+                    _moduleContext,
+                    mvcExpress.Logging.MvcLogContext.RegistrationSource.Attribute,
+                    null,
+                    null, 0);
+                MvcPluginBus.FireServiceRegistered(serviceType, _moduleType, mvcExpress.Logging.MvcLogContext.RegistrationSource.Attribute);
 #endif
-                }
-                catch (Exception ex)
-                {
-                    MvcDebug.LogError(
-                        $"Failed to register service '{metadata.ServiceType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
-                }
             }
-#endif
+            catch (Exception ex)
+            {
+                MvcDebug.LogError(
+                    $"Failed to register service '{serviceType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+            }
         }
+#endif
 
         /// <summary>
         /// Bind commands marked with [Bind] attribute.

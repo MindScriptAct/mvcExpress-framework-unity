@@ -1,0 +1,19 @@
+{
+    "name": "mvcExpress.PerformanceHarness.Editor",
+    "rootNamespace": "mvcExpress.Editor",
+    "references": [
+        "org.mvcexpress.core",
+        "mvcExpress.PerformanceHarness"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

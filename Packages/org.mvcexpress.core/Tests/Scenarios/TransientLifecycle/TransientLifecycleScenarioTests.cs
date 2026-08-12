@@ -1,4 +1,5 @@
-﻿using mvcExpress.Internal.Commands;
+﻿using System;
+using mvcExpress.Internal.Commands;
 using mvcExpress.Internal.DependencyInjection;
 using mvcExpress.Internal.Messaging;
 using NUnit.Framework;
@@ -186,6 +187,36 @@ namespace mvcExpress.Tests.Scenarios
                 "Unregistering a transient dependency should clear pooled commands that previously resolved it, forcing a fresh command on next execution.");
             Assert.That(UsesTransientProxyCommand.LastProxyId, Is.EqualTo(2),
                 "After re-registering the transient proxy, the next command execution should resolve the new proxy instance.");
+        }
+
+        [Test]
+        public void TransientProxy_UnregisteredAfterForcedGC_PoolStillInvalidated()
+        {
+            // H2 regression guard: MvcCommandProcessor subscribes to transient-removal
+            // notifications once, at construction (see SetUp). The bug was a weak reference to
+            // an unrooted delegate, so any GC between subscribe and Unregister silently broke
+            // invalidation forever after. Force a GC here - the other tests in this file never
+            // do, so they do not actually catch a H2 regression.
+            _container.Register(new ScenarioTransientProxy()).ToLogic().AsTransient();
+            _processor.CreatePool<UsesTransientProxyCommand>(poolSize: 1);
+            _processor.Run<UsesTransientProxyCommand>();
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+
+            _container.Unregister<ScenarioTransientProxy>();
+            _container.Register(new ScenarioTransientProxy()).ToLogic().AsTransient();
+            _processor.Run<UsesTransientProxyCommand>();
+
+            Assert.That(UsesTransientProxyCommand.CreatedCount, Is.EqualTo(2),
+                "After a GC occurs while the processor's transient-removal subscription is live, " +
+                "unregistering the transient dependency must still invalidate the pooled command. " +
+                "Before the H2 fix, the subscription delegate could be collected by the forced GC " +
+                "above, silently breaking invalidation with no error and no warning.");
+            Assert.That(UsesTransientProxyCommand.LastProxyId, Is.EqualTo(2),
+                "The next execution after the forced GC and re-registration must resolve the new " +
+                "transient proxy instance, not a stale reference to the disposed one.");
         }
 
         [Test]

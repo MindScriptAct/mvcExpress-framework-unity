@@ -1,0 +1,64 @@
+﻿{
+    "unityVersion": "6000.5.1f1",
+    "isDevelopmentBuild": true,
+    "warmupIterations": 100,
+    "measuredIterations": 10000,
+    "results": [
+        {
+            "name": "GcByteCounterDiagnostic_1MBAllocation",
+            "totalMilliseconds": 0.3765,
+            "nanosecondsPerOp": 37.65,
+            "allocatedBytesDelta": 0,
+            "bytesPerOp": 0.0,
+            "correctnessCheckPassed": true
+        },
+        {
+            "name": "MessagePublish_ZeroPayload",
+            "totalMilliseconds": 1.7146000000000002,
+            "nanosecondsPerOp": 171.46,
+            "allocatedBytesDelta": 0,
+            "bytesPerOp": 0.0,
+            "correctnessCheckPassed": true
+        },
+        {
+            "name": "MessagePublish_OnePayload",
+            "totalMilliseconds": 2.1808,
+            "nanosecondsPerOp": 218.08,
+            "allocatedBytesDelta": 0,
+            "bytesPerOp": 0.0,
+            "correctnessCheckPassed": true
+        },
+        {
+            "name": "PooledCommandDispatch_ZeroPayload",
+            "totalMilliseconds": 7.9813,
+            "nanosecondsPerOp": 798.13,
+            "allocatedBytesDelta": 0,
+            "bytesPerOp": 0.0,
+            "correctnessCheckPassed": true
+        },
+        {
+            "name": "PooledCommandDispatch_WithInjectedDependency",
+            "totalMilliseconds": 8.5008,
+            "nanosecondsPerOp": 850.08,
+            "allocatedBytesDelta": 0,
+            "bytesPerOp": 0.0,
+            "correctnessCheckPassed": true
+        },
+        {
+            "name": "UnpooledDefaultCommandDispatch_Canary",
+            "totalMilliseconds": 105.56790000000001,
+            "nanosecondsPerOp": 10556.79,
+            "allocatedBytesDelta": 0,
+            "bytesPerOp": 0.0,
+            "correctnessCheckPassed": true
+        },
+        {
+            "name": "MediatorPublish_AfterSubscribeWarmup",
+            "totalMilliseconds": 12.2512,
+            "nanosecondsPerOp": 1225.12,
+            "allocatedBytesDelta": 0,
+            "bytesPerOp": 0.0,
+            "correctnessCheckPassed": true
+        }
+    ]
+}

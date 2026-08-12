@@ -53,7 +53,7 @@ namespace mvcExpress
     /// [RegisterGlobal(RegisterToLogic = true, RegisterToView = true, LogicInterface = typeof(IMyProxy), ViewInterface = typeof(IMyProxy), Lifecycle = RegistrationLifecycle.Permanent)]
     /// </code> 
     /// </example>
-    [AttributeUsage(AttributeTargets.Class, AllowMultiple = false, Inherited = false)]
+    [AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = false)]
     public sealed class RegisterGlobalAttribute : Attribute
     {
         /// <summary>

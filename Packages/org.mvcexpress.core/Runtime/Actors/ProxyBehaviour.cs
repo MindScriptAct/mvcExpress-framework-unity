@@ -106,7 +106,7 @@ namespace mvcExpress
                 MvcLogContext.LogCategory.Proxy);
             _messenger = new MessengerApi(_actorContext);
             _container = new ModuleContainerApi(_actorContext);
-            _globalContainer = new GlobalContainerApi();
+            _globalContainer = new GlobalContainerApi(useViewScope: false);
             _dependenciesLinked = true;
 
             if (!deferOnInitialized)
@@ -151,7 +151,7 @@ namespace mvcExpress
                 MvcLogContext.LogCategory.Proxy);
             _messenger = new MessengerApi(_actorContext);
             _container = new ModuleContainerApi(_actorContext);
-            _globalContainer = new GlobalContainerApi();
+            _globalContainer = new GlobalContainerApi(useViewScope: false);
             _dependenciesLinked = true;
 
             if (!deferOnInitialized)

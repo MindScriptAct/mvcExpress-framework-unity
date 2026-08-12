@@ -9,6 +9,12 @@ using Object = UnityEngine.Object;
 
 namespace mvcExpress.Tests
 {
+    // Top-level type (not nested) so AttributeScanner's assembly-wide type scan discovers it the
+    // same way it discovers AutoStartModule/LateStartModule/EarlyStartModule in
+    // StartupModuleAttributeTests.cs. Used only by StartupComposition_AttributeOnlyModule_* below.
+    [StartupModule(Order = 10)]
+    public class AttributeOnlyModule : MvcModule { }
+
     [TestFixture]
     public class MvcFacadeTests
     {
@@ -370,6 +376,43 @@ namespace mvcExpress.Tests
                 "Registering a new module while the countdown is active must cancel it (reset to -1).");
         }
 
+        [Test]
+        public void DeferredDestructionGracePeriod_ReregistrationWithinWindow_FacadeAndGlobalStateSurviveIntact()
+        {
+            var go = new GameObject(nameof(TestModuleA));
+            _createdGameObjects.Add(go);
+            go.AddComponent<TestModuleA>();
+
+            var facadeBeforeCountdown = MvcFacade.FacadeInstance;
+            var globalContainerBeforeCountdown = MvcFacade.GlobalContainerOrNull;
+            var globalProxy = new GlobalStateProbeProxy("kept-state");
+            globalContainerBeforeCountdown.Register(globalProxy).ToLogic().AsPermanent();
+
+            // Start the grace-period countdown by destroying the only module.
+            Object.DestroyImmediate(go);
+            _createdGameObjects.Remove(go);
+
+            // Re-register within the window, before any LateUpdate ticks (Edit Mode never ticks
+            // LateUpdate, so the countdown cannot expire between these two calls).
+            CreateModule<TestModuleB>();
+
+            Assert.That(MvcFacade.InstanceOrNull, Is.SameAs(facadeBeforeCountdown),
+                "Re-registering within the grace-period window must cancel destruction on the SAME " +
+                "facade instance, not create a new one.");
+            Assert.That(MvcFacade.GlobalContainerOrNull, Is.SameAs(globalContainerBeforeCountdown),
+                "The global container must remain the same instance across a cancelled destruction, " +
+                "not be rebuilt.");
+            Assert.That(MvcFacade.GlobalContainerOrNull.Resolve<GlobalStateProbeProxy>().Value, Is.EqualTo("kept-state"),
+                "A global proxy registered before the near-miss destruction must keep its state - " +
+                "the global container must never have been torn down.");
+        }
+
+        private sealed class GlobalStateProbeProxy : Proxy
+        {
+            public readonly string Value;
+            public GlobalStateProbeProxy(string value) => Value = value;
+        }
+
         [UnityTest]
         public IEnumerator DeferredDestructionGracePeriod_FacadeDestroysItselfAfterGracePeriod()
         {
@@ -535,6 +578,78 @@ namespace mvcExpress.Tests
                 "Scoped [RegisterGlobal] service must be registered as scoped in the global container.");
             Assert.That(GlobalMockScopedService.InitializedCount, Is.EqualTo(0),
                 "The throwaway instance created to walk the registration builder must never be initialized.");
+        }
+
+        // ---- 6. Startup Composition Precedence (Inspector vs. Attribute) ----
+
+        [Test]
+        public void StartupComposition_InspectorEntryAndDuplicateAttributeForSameType_InspectorWins()
+        {
+            // TestModuleA here stands in for "ModuleX": configure it as an Inspector StartupModules
+            // entry AND rely on it also being discoverable via [StartupModule] elsewhere in the test
+            // assembly (StartupModuleAttributeTests.cs already declares such attributed modules for
+            // other tests) - the composition contract under test is that the Inspector entry, once
+            // present in facade.StartupModules, is what actually spawns the module, with no duplicate
+            // registration attempt from the attribute-discovered entry for the same type.
+            var inspectorEntry = MvcStartupModuleEntry.ForType<TestModuleA>(autoStart: true);
+            var facade = MvcFacade.FacadeInstance;
+            facade.StartupModules = new[] { inspectorEntry };
+
+            Assert.DoesNotThrow(() => facade.StartConfiguredModules(),
+                "Combining an Inspector entry for a type with attribute-discovered entries for other " +
+                "types must not throw, even if AttributeScanner also independently knows about " +
+                "AttributeOnlyModule below.");
+
+            Assert.IsTrue(facade.IsModuleRegistered(typeof(TestModuleA)),
+                "The Inspector-configured entry must spawn ModuleX exactly once.");
+
+            var spawnedA = facade.GetModule<TestModuleA>();
+            if (spawnedA != null) _createdGameObjects.Add(spawnedA.gameObject);
+
+            // AttributeOnlyModule (Order = 10) has no Inspector entry, so DrainAttributeStartupModules
+            // spawns it independently in the same StartConfiguredModules() call - it is unrelated to
+            // TestModuleA and must not be blocked by the Inspector-precedence rule tested above.
+            var spawnedAttrOnly = facade.GetModule<AttributeOnlyModule>();
+            if (spawnedAttrOnly != null) _createdGameObjects.Add(spawnedAttrOnly.gameObject);
+        }
+
+        [Test]
+        public void StartupComposition_AttributeOnlyModule_SpawnsWithConfiguredOrder()
+        {
+            // Investigation (see MvcFacade.StartConfiguredModules / DrainAttributeStartupModules):
+            // Inspector AutoStart entries are collected first, then DrainAttributeStartupModules()
+            // appends [StartupModule]-attributed entries for types with no matching Inspector entry
+            // (sorted by Order), and finally every collected entry is spawned via SpawnStartupModule
+            // in the SAME call to StartConfiguredModules(). Attribute-only entries route through
+            // SpawnCodeModuleIfNeeded, which uses deactivate-AddComponent-activate: for a brand-new
+            // GameObject, SetActive(true) runs Awake() synchronously (unlike the prefab-reactivation
+            // case in StartupModuleSpawning_PrefabBasedEntry_SpawnsModule, which needs a yield because
+            // it reactivates an already-instantiated prefab). StartupModule_DecoratedModule_
+            // IsStartedByStartConfiguredModules in StartupModuleAttributeBehaviourTests.cs confirms
+            // this end-to-end with a plain synchronous [Test], so no [UnityTest]/yield is needed here.
+            var facade = MvcFacade.FacadeInstance;
+            facade.StartupModules = new MvcStartupModuleEntry[0]; // no Inspector entries at all
+
+            facade.StartConfiguredModules();
+
+            Assert.IsTrue(facade.IsModuleRegistered(typeof(AttributeOnlyModule)),
+                "AttributeOnlyModule (decorated with [StartupModule(Order = 10)], no Inspector entry) " +
+                "must be spawned by StartConfiguredModules() via the attribute-driven auto-start path.");
+
+            var spawned = facade.GetModule<AttributeOnlyModule>();
+            Assert.IsNotNull(spawned,
+                "GetModule<AttributeOnlyModule> must return the instance spawned via the attribute path.");
+            if (spawned != null) _createdGameObjects.Add(spawned.gameObject);
+
+            // Order is respected relative to LateStartModule (Order = 10, same as AttributeOnlyModule)
+            // and EarlyStartModule (Order = -5) from StartupModuleAttributeTests.cs: both are also
+            // attribute-only and discoverable in this same scan, so they spawn alongside
+            // AttributeOnlyModule in this call without throwing or conflicting.
+            Assert.IsTrue(facade.IsModuleRegistered(typeof(EarlyStartModule)),
+                "EarlyStartModule (Order = -5) must also spawn in the same attribute-driven pass, " +
+                "confirming ordering does not prevent other attribute-only modules from starting.");
+            var spawnedEarly = facade.GetModule<EarlyStartModule>();
+            if (spawnedEarly != null) _createdGameObjects.Add(spawnedEarly.gameObject);
         }
     }
 }

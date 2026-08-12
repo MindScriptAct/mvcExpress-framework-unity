@@ -521,17 +521,22 @@ namespace mvcExpress.Internal.Initialization
         // cannot be created via Activator.CreateInstance like plain types.
         private static void ScanForRegisterGlobalAttribute(Type type)
         {
-            var attr = type.GetCustomAttribute<RegisterGlobalAttribute>(inherit: false);
-            if (attr == null)
-                return;
+            // Use the plural, multi-attribute-safe overload: RegisterGlobalAttribute allows
+            // stacking (multiple attributes on the same type), and the singular
+            // GetCustomAttribute<T>() throws "Multiple custom attributes of the same type found"
+            // as soon as two or more are present, aborting the entire assembly scan.
+            var attrs = type.GetCustomAttributes<RegisterGlobalAttribute>(inherit: false);
 
-            try
+            foreach (var attr in attrs)
             {
-                _globalCache.Add(new GlobalRegistrationMetadata(type, attr));
-            }
-            catch (Exception ex)
-            {
-                MvcDebug.LogError($"Failed to cache [RegisterGlobal] metadata for '{type.FullName}': {ex.Message}");
+                try
+                {
+                    _globalCache.Add(new GlobalRegistrationMetadata(type, attr));
+                }
+                catch (Exception ex)
+                {
+                    MvcDebug.LogError($"Failed to cache [RegisterGlobal] metadata for '{type.FullName}': {ex.Message}");
+                }
             }
         }
 

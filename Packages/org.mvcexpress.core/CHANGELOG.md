@@ -2,6 +2,24 @@
 
 All notable changes to `org.mvcexpress.core` are documented here.
 
+## [0.9.3] - 2026-08-12
+
+### Added
+
+- Registration fluent API supports multi-mapping: `.ToLogicAs<T>()` / `.ToViewAs<T>()` (and the non-generic `Register(instance, type)` form) can now be chained multiple times with different types to register one instance under any number of logic and/or view keys in a single call - e.g. `Register(proxy).ToLogicAs<IReadOnlyThing>().ToLogicAs<IMeasurementThing>().AsPermanent()`.
+- `[RegisterGlobal]` can now be stacked (`AllowMultiple = true`): apply it more than once on one class with different `LogicInterface`/`ViewInterface` values to share a single global instance across multiple resolvable types. Stacking `[Register]` (module-scoped) is now fully functional end-to-end as well - previously it collided when registering the same concrete type twice.
+- `MvcFacade` code-override hooks for global registration: subclass `MvcFacade`, override `RegisterGlobalServices()` / `RegisterGlobalProxies()`, and use the new protected `GlobalDependencies` (`FacadeGlobalContainerApi`) to register or resolve against the global container before any module initializes. Runs after the Inspector-driven Global Services/Proxies registries and the `[RegisterGlobal]` attribute drain, so code registrations win on type conflicts - matching `MvcModule`'s own Inspector → Attribute → Code precedence. `MvcFacade` is no longer `sealed`, to support subclassing.
+- Module extension plugin system: implement `IMvcModuleExtension` (`OnExtensionSetup`, `OnModuleInitialized`, `OnModuleDestroy`) on a component placed on an `MvcModule` GameObject or its children. `MvcModule` auto-discovers and drives it through the module's initialization/teardown lifecycle, handing it an `MvcModuleExtensionContext` with module-scoped `Messenger` and `Container` plus the app-wide `MessageBus`.
+- `MvcMessageBus.SubscribeOnce<TMessage, ...>(handler)` and `MvcMessageBus.SubscribeWhen<TMessage, ...>(handler, condition)` (0-5 typed parameters): fire-once and conditional subscription helpers, previously only available through a mediator's `Messenger`, now usable directly against the message bus from proxies, services, and module extensions.
+
+### Changed
+
+- Calling `.ToLogicAs<T>()` / `.ToViewAs<T>()` twice for the same type within one registration chain now throws `InvalidOperationException` immediately instead of silently discarding the earlier mapping.
+
+### Fixed
+
+- `Container.Resolve<T>()` / `Global.Resolve<T>()` called from a mediator outside its injection window (`OnEnable`, `Update`, coroutines, event callbacks, etc.) could silently resolve against the logic container instead of the view container: scope was read from an ambient flag that only reflected "view" for the duration of `OnInitialized()`. Each actor's `Container`/`Global` now captures its scope explicitly when the actor is initialized (mediator = view, proxy = logic), independent of when the call is made.
+
 ## [0.9.2] - 2026-07-06
 
 ### Added

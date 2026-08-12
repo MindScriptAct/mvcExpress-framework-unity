@@ -218,5 +218,74 @@ namespace mvcExpress.Tests.Scenarios
             Assert.Throws<InvalidOperationException>(() => _moduleB.Container.Resolve<LocalDependencyProxy>(),
                 "Module B should not resolve a proxy registered only in Module A's local container. Shared dependencies belong in global scope.");
         }
+
+        private readonly struct CrossModuleMessage : IMessage<int> { }
+
+        private sealed class CrossModuleCommand : Command<int>
+        {
+            public static int ExecuteCount;
+            public static int LastValue;
+
+            public static void Reset()
+            {
+                ExecuteCount = 0;
+                LastValue = 0;
+            }
+
+            public override void Execute(int value)
+            {
+                ExecuteCount++;
+                LastValue = value;
+            }
+        }
+
+        private sealed class CrossModuleMediator : MediatorBehaviour
+        {
+            public static int ReceivedCount;
+
+            public static void Reset() => ReceivedCount = 0;
+
+            protected override void OnInitialized()
+            {
+                Messenger.Subscribe<CrossModuleMessage, int>(_ => ReceivedCount++);
+            }
+        }
+
+        [Test]
+        public void CrossModuleRoundTrip_ModuleAPublishesOnSharedBus_ModuleBRespondsThenNoOpsAfterDestroy()
+        {
+            CrossModuleCommand.Reset();
+            CrossModuleMediator.Reset();
+
+            using var sharedBus = new MvcMessageBus();
+            var moduleBProcessor = new MvcCommandProcessor(typeof(NoInitModule), _moduleB.Container, sharedBus, _moduleB.Module);
+            moduleBProcessor.BindCommand<CrossModuleCommand, CrossModuleMessage, int>();
+
+            var mediatorGo = new GameObject("CrossModuleMediator");
+            mediatorGo.transform.SetParent(_moduleB.GameObject.transform);
+            var mediator = mediatorGo.AddComponent<CrossModuleMediator>();
+            mediator.Initialize(_moduleB.Module, _moduleB.Container, sharedBus);
+
+            sharedBus.Publish<CrossModuleMessage, int>(5);
+
+            Assert.That(CrossModuleCommand.ExecuteCount, Is.EqualTo(1),
+                "The first publish on the shared bus must execute Module B's bound command.");
+            Assert.That(CrossModuleCommand.LastValue, Is.EqualTo(5),
+                "Module B's command must receive the payload from Module A's publish.");
+            Assert.That(CrossModuleMediator.ReceivedCount, Is.EqualTo(1),
+                "The first publish must also reach Module B's mediator subscription.");
+
+            moduleBProcessor.Dispose();
+            Object.DestroyImmediate(mediatorGo);
+
+            Assert.DoesNotThrow(() => sharedBus.Publish<CrossModuleMessage, int>(9),
+                "A second publish after Module B's command processor and mediator are torn down " +
+                "must be a clean no-op - no exceptions from dangling subscriptions or bindings.");
+            Assert.That(CrossModuleCommand.ExecuteCount, Is.EqualTo(1),
+                "The second publish must not execute the now-disposed command processor's binding again.");
+            Assert.That(CrossModuleMediator.ReceivedCount, Is.EqualTo(1),
+                "The second publish must not reach the destroyed mediator - its subscription must " +
+                "have been cleaned up automatically.");
+        }
     }
 }
