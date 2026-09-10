@@ -8,6 +8,7 @@
 /[Oo]bj/
 /[Bb]uild/
 /[Bb]uilds/
+/BenchmarkResults/
 /[Ll]ogs/
 /[Uu]ser[Ss]ettings/
 *.log
@@ -41,6 +42,7 @@
 ExportedObj/
 .consulo/
 *.csproj
+!Tools/PerformanceDashboard/PerformanceDashboard.csproj
 *.unityproj
 *.sln
 *.suo
@@ -78,6 +80,7 @@ crashlytics-build.properties
 
 # TestRunner generated files
 InitTestScene*.unity*
+/test-results*.xml
 
 # Addressables default ignores, before user customizations
 /ServerData
@@ -99,3 +102,6 @@ InitTestScene*.unity*
 /[Aa]ssets/[Ii]nit[Tt]est[Ss]cene*.unity*
 InternalSpecs
 docs
+Tools/PerformanceDashboard/bin
+Tools/PerformanceDashboard/obj
+.github

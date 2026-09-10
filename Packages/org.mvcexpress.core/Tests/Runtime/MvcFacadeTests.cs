@@ -37,6 +37,23 @@ namespace mvcExpress.Tests
             protected override void OnDestroy() {}
         }
 
+        // Counts BindCommands() calls so tests can prove whether InitializeModule() ran.
+        // Reset in each test that uses it - static because MvcModule instances are new each time.
+        private class TrackedInitModule : MvcModule
+        {
+            public static int BindCommandsCallCount;
+            protected override void BindCommands() { BindCommandsCallCount++; }
+        }
+
+        // Counts OnModuleAwake() calls so tests can prove whether it ran for a rejected
+        // duplicate. Reset in each test that uses it - static
+        // because MvcModule instances are new each time.
+        private class TrackedOnModuleAwakeModule : MvcModule
+        {
+            public static int OnModuleAwakeCallCount;
+            protected override void OnModuleAwake() { OnModuleAwakeCallCount++; }
+        }
+
         // ── Fields ────────────────────────────────────────────────────────────
 
         // GameObjects created by tests; destroyed in TearDown.
@@ -300,6 +317,123 @@ namespace mvcExpress.Tests
 
             Assert.IsFalse(facade.IsModuleRegistered(typeof(TestModuleA)),
                 "IsModuleRegistered must return false after the module's GameObject is destroyed.");
+        }
+
+        // ---- 2b. Duplicate Module Registration ----------------------
+        //
+        // MvcModule.Awake() used to call InitializeModule() (which binds commands and attaches
+        // mediators onto the shared MvcFacade.MessageBus) BEFORE RegisterModule() ever checked
+        // for a duplicate. A rejected duplicate could therefore already have polluted shared
+        // state, and its own teardown removed the ORIGINAL module from the registry because
+        // UnregisterModule() removed by key alone, ignoring which instance was stored there.
+
+        [Test]
+        public void DuplicateModuleRegistration_RejectedDuplicate_NeverRunsInitializationPhases()
+        {
+            TrackedInitModule.BindCommandsCallCount = 0;
+
+            // First instance registers and initializes normally.
+            CreateModule<TrackedInitModule>();
+            Assert.AreEqual(1, TrackedInitModule.BindCommandsCallCount,
+                "Precondition: the first module's own BindCommands() must run exactly once.");
+
+            // Second instance of the same type is a duplicate. Its Awake() must be rejected
+            // by RegisterModule() BEFORE InitializeModule() runs, so BindCommands() (which
+            // binds handlers onto the shared message bus) must never fire for it. Awake() logs
+            // this rejection as an error - expect it so the test framework's strict log check
+            // does not itself fail the test.
+            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(
+                "Duplicate module of type 'TrackedInitModule' detected"));
+            CreateModule<TrackedInitModule>();
+
+            Assert.AreEqual(1, TrackedInitModule.BindCommandsCallCount,
+                "A rejected duplicate module must never run its initialization phases - " +
+                "BindCommands() must not be called a second time.");
+        }
+
+        [Test]
+        public void DuplicateModuleRegistration_RejectedDuplicate_NeverRunsOnModuleAwake()
+        {
+            TrackedOnModuleAwakeModule.OnModuleAwakeCallCount = 0;
+
+            // First instance registers and runs OnModuleAwake() normally.
+            CreateModule<TrackedOnModuleAwakeModule>();
+            Assert.AreEqual(1, TrackedOnModuleAwakeModule.OnModuleAwakeCallCount,
+                "Precondition: the first module's own OnModuleAwake() must run exactly once.");
+
+            // Second instance of the same type is a duplicate. Identity must be reserved with
+            // the facade BEFORE OnModuleAwake() runs, so a duplicate's pre-init hook - which can
+            // mutate shared state - never executes at all. Awake() logs the rejection as an
+            // error - expect it so the test framework's strict log check does not itself fail
+            // the test.
+            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(
+                "Duplicate module of type 'TrackedOnModuleAwakeModule' detected"));
+            CreateModule<TrackedOnModuleAwakeModule>();
+
+            Assert.AreEqual(1, TrackedOnModuleAwakeModule.OnModuleAwakeCallCount,
+                "A rejected duplicate module must never run OnModuleAwake() - identity is reserved " +
+                "with the facade before OnModuleAwake() runs, so a duplicate's pre-init side effects " +
+                "never execute at all.");
+        }
+
+        [UnityTest]
+        public IEnumerator DuplicateModuleRegistration_RejectedDuplicate_IsDestroyedAndOriginalStaysRegistered()
+        {
+            var original = CreateModule<TestModuleA>();
+            var facade = MvcFacade.FacadeInstance;
+
+            // Create a duplicate GameObject directly (not via CreateModule<T>, so we can
+            // observe its fate) and let its Awake() run.
+            var duplicateGo = new GameObject("TestModuleA_Duplicate");
+            _createdGameObjects.Add(duplicateGo);
+
+            LogAssert.Expect(LogType.Error, new System.Text.RegularExpressions.Regex(
+                "Duplicate module of type 'TestModuleA' detected"));
+            duplicateGo.AddComponent<TestModuleA>();
+
+            // Destroy(gameObject) is deferred to end-of-frame in Play Mode - yield once so it
+            // actually takes effect before we check Unity's overloaded null comparison.
+            yield return null;
+
+            Assert.IsTrue(duplicateGo == null,
+                "A rejected duplicate module's GameObject must be destroyed by Awake() itself " +
+                "(Unity's overloaded == reports 'null' for a destroyed object).");
+
+            // The original module's registration must survive the duplicate's rejection AND
+            // its own teardown (OnDestroy -> UnregisterModule) unharmed.
+            Assert.IsTrue(facade.IsModuleRegistered(typeof(TestModuleA)),
+                "The original module must remain registered after a duplicate is rejected and destroyed.");
+            Assert.AreSame(original, facade.GetModule<TestModuleA>(),
+                "GetModule<T> must still return the original instance, not be wiped out by the " +
+                "rejected duplicate's teardown.");
+        }
+
+        [Test]
+        public void ModuleRegistrationAndTracking_UnregisterByStaleInstance_DoesNotRemoveCurrentRegistration()
+        {
+            // Simulates a module instance that was
+            // never (successfully) registered still calls UnregisterModule() during its own
+            // teardown. That call must not be able to evict a different, currently-registered
+            // instance of the same type.
+            var go1 = new GameObject("NoInit_Current");
+            _createdGameObjects.Add(go1);
+            var currentModule = go1.AddComponent<NoInitModule>();
+
+            var go2 = new GameObject("NoInit_Stale");
+            _createdGameObjects.Add(go2);
+            var staleModule = go2.AddComponent<NoInitModule>();
+
+            var facade = MvcFacade.FacadeInstance;
+            facade.RegisterModule(currentModule);
+
+            // staleModule was never registered (mirrors a duplicate rejected by RegisterModule),
+            // but its teardown still calls UnregisterModule() the same way OnDestroy() would.
+            facade.UnregisterModule(staleModule);
+
+            Assert.IsTrue(facade.IsModuleRegistered(typeof(NoInitModule)),
+                "Unregistering a stale/foreign instance must not remove the current registration.");
+            Assert.AreSame(currentModule, facade.GetModule<NoInitModule>(),
+                "The currently-registered instance must be unaffected by a stale UnregisterModule call.");
         }
 
         // ---- 3. Deferred Destruction Grace Period ---------------------------
@@ -650,6 +784,83 @@ namespace mvcExpress.Tests
                 "confirming ordering does not prevent other attribute-only modules from starting.");
             var spawnedEarly = facade.GetModule<EarlyStartModule>();
             if (spawnedEarly != null) _createdGameObjects.Add(spawnedEarly.gameObject);
+        }
+
+        // ---- 8. Deferred-Publish Budget Validation (PERF-03 follow-up) -------
+        //
+        // MaxDeferredPublishesPerFrame/MaxDeferredPublishMillisecondsPerFrame are public static
+        // properties settable from any project code, which makes them a real input boundary: a
+        // negative value would otherwise make Update()'s own budget check false on its very first
+        // comparison, silently stalling the deferred-publish queue forever - worse than the frame
+        // spike this feature exists to prevent. Each test restores the default in a finally block
+        // so a failure here cannot leak a bad budget into unrelated tests.
+
+        [Test]
+        public void MaxDeferredPublishesPerFrame_SetNegative_ClampsToZeroAndWarns()
+        {
+            try
+            {
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("MaxDeferredPublishesPerFrame cannot be negative"));
+                MvcFacade.MaxDeferredPublishesPerFrame = -5;
+
+                Assert.That(MvcFacade.MaxDeferredPublishesPerFrame, Is.EqualTo(0),
+                    "A negative budget must be clamped to 0, not accepted as-is (which would stall the queue forever).");
+            }
+            finally
+            {
+                MvcFacade.MaxDeferredPublishesPerFrame = int.MaxValue;
+            }
+        }
+
+        [Test]
+        public void MaxDeferredPublishMillisecondsPerFrame_SetNegative_ClampsToZeroAndWarns()
+        {
+            try
+            {
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("MaxDeferredPublishMillisecondsPerFrame cannot be negative"));
+                MvcFacade.MaxDeferredPublishMillisecondsPerFrame = -10;
+
+                Assert.That(MvcFacade.MaxDeferredPublishMillisecondsPerFrame, Is.EqualTo(0),
+                    "A negative budget must be clamped to 0, not accepted as-is (which would stall the queue forever).");
+            }
+            finally
+            {
+                MvcFacade.MaxDeferredPublishMillisecondsPerFrame = double.MaxValue;
+            }
+        }
+
+        [Test]
+        public void MaxDeferredPublishMillisecondsPerFrame_SetNaN_IgnoredAndWarns()
+        {
+            MvcFacade.MaxDeferredPublishMillisecondsPerFrame = 250; // known non-default value to prove NaN is rejected, not silently accepted
+            try
+            {
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("MaxDeferredPublishMillisecondsPerFrame cannot be NaN"));
+                MvcFacade.MaxDeferredPublishMillisecondsPerFrame = double.NaN;
+
+                Assert.That(MvcFacade.MaxDeferredPublishMillisecondsPerFrame, Is.EqualTo(250),
+                    "NaN must be rejected, leaving the previously configured value in place.");
+            }
+            finally
+            {
+                MvcFacade.MaxDeferredPublishMillisecondsPerFrame = double.MaxValue;
+            }
+        }
+
+        [Test]
+        public void MaxDeferredPublishesPerFrame_SetNonNegative_AcceptsValueWithoutWarning()
+        {
+            try
+            {
+                MvcFacade.MaxDeferredPublishesPerFrame = 42;
+
+                Assert.That(MvcFacade.MaxDeferredPublishesPerFrame, Is.EqualTo(42),
+                    "A valid non-negative budget must be accepted unchanged.");
+            }
+            finally
+            {
+                MvcFacade.MaxDeferredPublishesPerFrame = int.MaxValue;
+            }
         }
     }
 }

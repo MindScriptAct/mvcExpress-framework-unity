@@ -1,6 +1,7 @@
 using mvcExpress.Internal.Interfaces;
 using mvcExpress.Logging;
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 
@@ -38,11 +39,16 @@ namespace mvcExpress
         /// Binds a no-payload message to a command.
         /// </summary>
         /// <param name="poolSize">
-        /// Defaults to 0 (unpooled). With <c>poolSize: 0</c> a fresh <typeparamref name="TCommand"/>
-        /// instance is allocated AND discarded on every single dispatch, which also re-runs
-        /// <c>[Inject]</c> member injection and <c>OnInitialize()</c> every time - this is the
-        /// most expensive path, not the default you get by not thinking about it. Pass a non-zero
-        /// <paramref name="poolSize"/> for any command bound to a high-frequency message; see
+        /// Defaults to 0 (unpooled) - a deliberate choice, not an oversight; do not "fix" this
+        /// default without reading the rationale below. Commands are one-shot, fire-and-forget
+        /// actors: most are bound to a message that fires
+        /// once or rarely (menu setup, a one-time save trigger), and many bound command types are
+        /// never reused at all. Pooling by default would keep every such command's instance alive
+        /// in memory for a reuse that never happens, which is a worse tradeoff than an occasional
+        /// allocation. With <c>poolSize: 0</c> a fresh <typeparamref name="TCommand"/> instance is
+        /// allocated and discarded on every dispatch, re-running <c>[Inject]</c> member injection
+        /// and <c>OnInitialize()</c> each time. Pass a non-zero <paramref name="poolSize"/> only
+        /// for commands you know are bound to a high-frequency message and benefit from reuse; see
         /// "Pooled commands" in command.md.
         /// </param>
 #if MVC_EXPRESS_NO_CODE
@@ -740,6 +746,18 @@ namespace mvcExpress
             PoolCreator.CreatePool<TCommand>(poolSize);
         }
 
+        // Every branch inside this method's body is already dead in a clean release build (no UNITY_EDITOR, no
+        // DEVELOPMENT_BUILD, no MVC_LOGGING) - MvcLogInternal's calls compile away via their own
+        // [Conditional] attributes, and MvcPluginBus's calls are behind an #if for the same set of
+        // symbols. But the wrapper itself was a plain method, so every one of the 13 Run<...>
+        // overloads still paid for a real call plus _context.ResolveModule() plus an `is MvcModule`
+        // type check on every single direct command run, for a body that does nothing in that
+        // configuration. Stacking one [Conditional] per symbol (OR semantics) makes the compiler
+        // strip the entire call - including evaluating filePath/lineNumber - at each of those 13
+        // call sites whenever none of the three symbols are defined, and keeps it whenever any one is.
+        [Conditional("UNITY_EDITOR")]
+        [Conditional("DEVELOPMENT_BUILD")]
+        [Conditional("MVC_LOGGING")]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void LogRun<TCommand>(string filePath, int lineNumber)
         {
@@ -756,6 +774,16 @@ namespace mvcExpress
 #endif
         }
 
+        // Same reasoning as LogRun above, plus a second, distinct cost: `new StackTrace(true)` was
+        // constructed unconditionally on every Bind<>() call, in every build, even though its only
+        // consumer (LogCommandBound's caller-file-name
+        // arguments) is itself [Conditional]-elided in release. A StackTrace(true) walks the stack
+        // and resolves file/line info from PDBs; that cost cannot be eliminated by the callee's own
+        // [Conditional] attribute because `caller` is computed in a prior statement, not inlined as
+        // an argument expression of the elided call - only stripping this whole wrapper removes it.
+        [Conditional("UNITY_EDITOR")]
+        [Conditional("DEVELOPMENT_BUILD")]
+        [Conditional("MVC_LOGGING")]
         private void LogBound<TCommand, TMessage>()
             where TCommand : MvcCommandBase
         {
@@ -768,7 +796,7 @@ namespace mvcExpress
                 MvcCompositionStyle.Code,
                 $"code command binding '{typeof(TCommand).Name}' to '{typeof(TMessage).Name}' in module '{module.GetType().Name}'");
 
-            var caller = new System.Diagnostics.StackTrace(true).GetFrame(2);
+            var caller = new StackTrace(true).GetFrame(2);
             MvcLogInternal.LogCommandBound(
                 typeof(TMessage).Name,
                 typeof(TCommand).Name,

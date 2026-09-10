@@ -6,7 +6,7 @@ namespace mvcExpress.Plugins
     /// <summary>
     /// Access surface handed to <see cref="IMvcModuleExtension"/> callbacks. Exposes the
     /// owning module, its message publishing API, its DI registration container, and the
-    /// app-wide message bus for non-mediator subscriptions.
+    /// application's single message bus for non-mediator subscriptions.
     /// </summary>
     public readonly struct MvcModuleExtensionContext
     {
@@ -20,8 +20,9 @@ namespace mvcExpress.Plugins
         public ModuleRegistrationContainerApi Container { get; }
 
         /// <summary>
-        /// The app-wide message bus. Advanced: allows extensions to Subscribe/Unsubscribe
-        /// outside the mediator path. Callers own their unsubscription.
+        /// The single application-wide message bus shared by every module. Advanced: allows
+        /// extensions to Subscribe/Unsubscribe outside the mediator path. Callers own their
+        /// unsubscription; this property does not represent a module-local bus.
         /// </summary>
         public MvcMessageBus MessageBus { get; }
 

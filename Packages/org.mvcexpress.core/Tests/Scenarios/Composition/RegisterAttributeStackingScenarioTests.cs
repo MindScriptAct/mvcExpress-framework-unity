@@ -1,3 +1,4 @@
+using System.Collections;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -48,25 +49,40 @@ namespace mvcExpress.Tests.Scenarios
                 "not create two separate instances - each registered under only one interface.");
         }
 
-        [Test]
-        public void TwoRegisterAttributes_SameModule_SameInterface_ThrowsInsteadOfSilentlySkipping()
+        [UnityTest]
+        public IEnumerator TwoRegisterAttributes_SameModule_SameInterface_ThrowsInsteadOfSilentlySkipping()
         {
             // The duplicate-in-chain collision is caught by RegisterAttributeProxyGroup's own
-            // registration try/catch and logged via MvcDebug.LogError (not rethrown) - Unity's test
-            // runner auto-fails a test on any unexpected error-level log, so it must be declared
-            // expected. AddComponent itself does not throw for this path (the error is caught
-            // internally), so no Assert.Throws is needed around it - only around the ground-truth
-            // Resolve() check below, which is what actually proves the duplicate didn't silently win.
+            // registration try/catch, logged via MvcDebug.LogError, and recorded as a composition
+            // failure. Initialization still runs to completion (phases 2-5 all get a chance to run),
+            // but the recorded failure is then thrown as one aggregated MvcCompositionException
+            // instead of being silently tolerated - same fatal path as
+            // TwoRegisterAttributes_SameClass_ConflictingLifecycle_Throws below.
             LogAssert.Expect(LogType.Error,
                 new System.Text.RegularExpressions.Regex("already mapped to logic scope"));
+            LogAssert.Expect(LogType.Error,
+                new System.Text.RegularExpressions.Regex("failed to initialize and will be destroyed"));
+            LogAssert.Expect(LogType.Exception,
+                new System.Text.RegularExpressions.Regex("attribute composition error"));
 
             _moduleGo = new GameObject(nameof(DuplicateStackingModule));
-            var module = _moduleGo.AddComponent<DuplicateStackingModule>();
+            try
+            {
+                _moduleGo.AddComponent<DuplicateStackingModule>();
+            }
+            catch (System.Exception)
+            {
+                // AddComponent may or may not surface the exception depending on Unity version;
+                // either way the module has already self-destroyed by the time this returns.
+            }
 
-            // Force the error to surface even if the framework logs-and-continues at a lower
-            // layer: assert the type never became resolvable in a way that hides the conflict.
-            Assert.Throws<System.InvalidOperationException>(
-                () => module.DiContainer.Resolve<IReadOnlyStackedThing>());
+            // Destroy(gameObject) is deferred to end-of-frame in Play Mode - yield once so it
+            // actually takes effect before checking Unity's overloaded null comparison.
+            yield return null;
+
+            Assert.IsTrue(_moduleGo == null,
+                "A module with an unresolved duplicate [Register] mapping must be destroyed, not " +
+                "left running with the conflict silently unresolved.");
         }
 
         [Register(typeof(LifecycleConflictModule), RegisterToLogic = true, LogicInterface = typeof(IReadOnlyStackedThing), Lifecycle = RegistrationLifecycle.Permanent)]
@@ -75,40 +91,49 @@ namespace mvcExpress.Tests.Scenarios
 
         public sealed class LifecycleConflictModule : MvcModule { }
 
-        [Test]
-        public void TwoRegisterAttributes_SameClass_ConflictingLifecycle_Throws()
+        [UnityTest]
+        public IEnumerator TwoRegisterAttributes_SameClass_ConflictingLifecycle_Throws()
         {
             // ResolveGroupLifecycle throws (uncaught) from inside RegisterAttributeProxyGroup,
             // propagating out through Awake(). Unity logs this as an unhandled exception, which
             // Unity's test runner auto-fails on unless declared expected via LogAssert.Expect.
             // Whether AddComponent itself re-throws to the caller is unreliable across Unity
             // versions (see ModuleInitializerTests.cs's ErrorHandlingAndDeferredLogging_AbortsOnFailure
-            // for the same established pattern in this codebase), so we tolerate either outcome and
-            // verify ground truth via container state instead of wrapping AddComponent in Assert.Throws.
+            // for the same established pattern in this codebase), so we tolerate either outcome.
+            //
+            // A module that throws during initialization self-destroys immediately
+            // (MvcModule.Awake()), which disposes and nulls its DI container as part of the normal
+            // OnDestroy() teardown - so "query the container after the fact" is no longer a
+            // meaningful ground truth (there is no container left to query, let alone a partial
+            // one). The module's own destruction is the strictly stronger guarantee this test's
+            // original comment wanted: if the whole module is gone, neither interface can possibly
+            // resolve, not just these two specifically.
+            //
+            // LogAssert.Expect enforces chronological order: MvcModule's own error log fires
+            // (synchronously, before self-destroy) BEFORE the rethrown exception reaches Unity's
+            // engine-level log, so it must be declared first here.
+            LogAssert.Expect(LogType.Error,
+                new System.Text.RegularExpressions.Regex("failed to initialize and will be destroyed"));
             LogAssert.Expect(LogType.Exception,
                 new System.Text.RegularExpressions.Regex("conflicting Lifecycle values"));
 
             _moduleGo = new GameObject(nameof(LifecycleConflictModule));
-            LifecycleConflictModule module = null;
             try
             {
-                module = _moduleGo.AddComponent<LifecycleConflictModule>();
+                _moduleGo.AddComponent<LifecycleConflictModule>();
             }
             catch (System.Exception)
             {
                 // AddComponent may or may not surface the exception depending on Unity version;
-                // either way the component exists and Awake ran up to the failure point.
+                // either way the module has already self-destroyed by the time this returns.
             }
 
-            if (module == null)
-                module = _moduleGo.GetComponent<LifecycleConflictModule>();
+            // Destroy(gameObject) is deferred to end-of-frame in Play Mode - yield once so it
+            // actually takes effect before checking Unity's overloaded null comparison.
+            yield return null;
 
-            // Ground truth: the lifecycle conflict must abort registration for the whole group -
-            // neither interface should resolve, since the group's registration never completed.
-            Assert.Throws<System.InvalidOperationException>(
-                () => module.DiContainer.Resolve<IReadOnlyStackedThing>());
-            Assert.Throws<System.InvalidOperationException>(
-                () => module.DiContainer.Resolve<IMeasurementStackedThing>());
+            Assert.IsTrue(_moduleGo == null,
+                "A module whose initialization throws must be destroyed.");
         }
     }
 }

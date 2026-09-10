@@ -16,7 +16,7 @@ namespace mvcExpress
     public interface IMessageBase { }
 
     /// <summary>
-    /// Contract for a message with no payload, published on the module's internal message bus.
+    /// Contract for a message with no payload, published on the single application-wide message bus.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -31,10 +31,10 @@ namespace mvcExpress
     /// Use a <c>class</c> only when the message carries large payload that would be expensive
     /// to copy, accepting the GC cost.
     /// </para>
-    /// <para><b>Scope:</b> The message bus is application-wide. A message published anywhere
-    /// is delivered to every subscriber in every module simultaneously. There is no per-module
-    /// filtering; cross-module communication requires no special mechanism beyond publishing
-    /// the message on the shared bus.
+    /// <para><b>Fundamental scope invariant:</b> One application has exactly one message bus,
+    /// owned by <see cref="MvcFacade"/> and shared by every module and actor. A message published
+    /// anywhere is delivered to every matching subscriber in the application. Module-local buses,
+    /// target-module delivery, message bridges, and per-module filtering are not part of the design.
     /// </para>
     /// </remarks>
     /// <example>

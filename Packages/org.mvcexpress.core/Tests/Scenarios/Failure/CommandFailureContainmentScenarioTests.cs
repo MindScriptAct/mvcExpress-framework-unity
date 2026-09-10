@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using mvcExpress.Internal.Commands;
 using mvcExpress.Internal.DependencyInjection;
 using mvcExpress.Internal.Messaging;
@@ -11,10 +12,15 @@ using Object = UnityEngine.Object;
 namespace mvcExpress.Tests.Scenarios
 {
     /// <summary>
-    /// Pins the documented failure-containment contract (docs audit D11): a sync command
-    /// exception is caught by MvcCommandProcessor (dispatch continues, OnCommandFault fires),
-    /// while a mediator handler exception propagates out of Publish and skips subsequent
-    /// subscribers on that same publish call.
+    /// Pins the documented failure-containment contract (docs audit D11, revised by MSG-02): a
+    /// sync command exception is caught by MvcCommandProcessor (dispatch continues, OnCommandFault
+    /// fires) in every build, unconditionally. A mediator handler exception is now ALSO caught
+    /// per-subscriber inside Publish's loop, but only in Editor/Development builds - dispatch
+    /// continues to later subscribers there. In release builds this isolation is compiled out
+    /// entirely for performance: a mediator handler exception still propagates out of Publish and
+    /// skips subsequent subscribers on that same publish call, exactly as before MSG-02. See
+    /// MvcMessageBus.cs's class remarks and messaging.md's "Subscriber exceptions" section for the
+    /// full rationale for this deliberate, permanent dev/release asymmetry.
     /// </summary>
     [TestFixture]
     [Category("Scenario")]
@@ -90,7 +96,7 @@ namespace mvcExpress.Tests.Scenarios
             Assert.That(ThrowingCommand.ExecuteAttempts, Is.EqualTo(1),
                 "The command must have actually executed (and thrown) once.");
             Assert.That(faults, Is.EquivalentTo(new[] { typeof(ThrowingCommand) }),
-                "OnCommandFault must fire exactly once with the failing command's type (M4 fix).");
+                "OnCommandFault must fire exactly once with the failing command's type.");
             Assert.That(laterHandlerRan, Is.True,
                 "A bus subscriber registered after the command binding must still run on the same " +
                 "publish, since the command's exception was contained by the processor and never " +
@@ -98,7 +104,7 @@ namespace mvcExpress.Tests.Scenarios
         }
 
         [Test]
-        public void MediatorHandlerThrows_PropagatesOutOfPublish_SkipsLaterSubscribersOnSamePublish()
+        public void MediatorHandlerThrows_IsolatedInDevBuilds_LaterSubscriberStillRunsOnSamePublish()
         {
             var firstHandlerRan = false;
             var laterHandlerRan = false;
@@ -107,17 +113,19 @@ namespace mvcExpress.Tests.Scenarios
             _bus.Subscribe<FailureMessage>(() => throw new InvalidOperationException("intentional handler failure"));
             _bus.Subscribe<FailureMessage>(() => laterHandlerRan = true);
 
-            Assert.Throws<InvalidOperationException>(() => _bus.Publish<FailureMessage>(),
-                "Unlike a command's Execute(), an exception thrown directly by a bus-subscribed " +
-                "handler is not caught anywhere in the bus's Publish loop - it must propagate out " +
-                "to the caller of Publish.");
+            LogAssert.Expect(LogType.Error, new Regex("Subscriber '.*' threw on FailureMessage:.*intentional handler failure"));
+
+            Assert.DoesNotThrow(() => _bus.Publish<FailureMessage>(),
+                "In Editor/Development builds, Publish now catches each subscriber's exception " +
+                "individually (MSG-02) - it must not propagate out of Publish itself here.");
 
             Assert.That(firstHandlerRan, Is.True,
                 "Handlers subscribed before the throwing one, in the same publish, must still run.");
-            Assert.That(laterHandlerRan, Is.False,
-                "Handlers subscribed after the throwing one must be skipped once the exception " +
-                "propagates out of the Publish loop - this is the asymmetry with command dispatch " +
-                "that scenario S8 exists to document and pin.");
+            Assert.That(laterHandlerRan, Is.True,
+                "Handlers subscribed after the throwing one must ALSO still run in Editor/Development " +
+                "builds - the exception is isolated per-subscriber, not propagated. (This isolation is " +
+                "compiled out entirely in release builds for performance, restoring the old fail-fast " +
+                "behavior there - see the class remarks above.)");
         }
     }
 }

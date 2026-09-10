@@ -2,6 +2,12 @@
 
 All notable changes to `org.mvcexpress.core` are documented here.
 
+## [0.9.5] - 2026-09-10
+
+### Changed
+
+- **Breaking:** invalid `[Register]`/`[Bind]`/`[Attach]`/`[RegisterGlobal]` attribute configuration (ambiguous or missing MonoBehaviour, failed `Activator.CreateInstance`, wrong base type, failed container registration, an `[Attach(FindInScene = true)]` mediator not found anywhere in its module's hierarchy, or `[Attach]` with neither `PrefabPath` nor `FindInScene` set) now aborts initialization instead of logging and continuing. A module with any such failure throws `MvcCompositionException` and self-destroys, exactly like the pre-existing lifecycle-conflict hard-throw; `[RegisterGlobal]` failures abort `MvcFacade`'s global initialization the same way, and the facade now refuses to silently retry after a failed attempt. Every failure across a single initialization pass is collected and reported together in one exception instead of stopping at the first one. See [Composition Validation](../../InternalSpecs/Architecture/COMPOSITION_VALIDATION.md) for the full rationale. Two of these conditions were previously non-fatal `LogWarning`s (declared-but-absent `FindInScene` mediator, `[Attach]` with no resolution strategy) - projects relying on either as an intentionally-optional pattern will now see a hard failure and need to either supply the mediator or remove the attribute.
+
 ## [0.9.4] - 2026-08-12
 
 ### Fixed
@@ -57,7 +63,7 @@ All notable changes to `org.mvcexpress.core` are documented here.
 - Runtime mediator cleanup gap: `MediatorRegistrar.Cleanup()` now explicitly calls `CleanupMediator()` on runtime mediators before clearing.
 - `WeakEventManager.Subscribe` made idempotent; `Unsubscribe` now uses value equality and removes all matching entries.
 - `MvcMessageBus` unnecessary finalizer removed; GC finalization queue overhead eliminated.
-- `BindCommandByType` reflection results now cached per `(commandType, messageType)` pair — reflection runs at most once per unique pair across all module instances.
+- `BindCommandByType` reflection results now cached per `(commandType, messageType)` pair - reflection runs at most once per unique pair across all module instances.
 - Pooled commands skip `[Inject]` re-injection on reuse (`_hasBeenInjected` flag); `OnInitialize()` now documented and enforced as once-per-creation.
 - `[EditorBrowsable(Never)]` applied to six internal-only public types to clean up IntelliSense noise.
 - Throwing `RegisterBehaviour<T>()` stub removed from `MvcDiContainer`; `IModuleBehaviourRegistrar` removed from `IModuleDiContainer` interface chain.

@@ -244,31 +244,12 @@ namespace mvcExpress.Tests
             Assert.That(ex.Message, Does.Contain("already registered as an instance"));
         }
 
-        [Test]
-        public void Resolve_ScopedProxyWithinScopedResolutionScope_ReusesAndDisposesInstance()
-        {
-            _container.Register(new ScopedProxy()).ToLogic().AsScoped();
-
-            Assert.That(_container.IsScoped(typeof(ScopedProxy)), Is.True);
-            Assert.Throws<InvalidOperationException>(() => _container.Resolve<ScopedProxy>(),
-                "Scoped dependencies must require an active scoped resolution context.");
-
-            ScopedProxy first;
-            using (_container.BeginScopedResolutionScope())
-            {
-                first = _container.Resolve<ScopedProxy>();
-                var second = _container.Resolve<ScopedProxy>();
-
-                Assert.That(second, Is.SameAs(first),
-                    "Scoped dependencies must be reused within one scoped resolution context.");
-                Assert.That(first.CleanupCalled, Is.False);
-            }
-
-            Assert.Throws<ObjectDisposedException>(
-                () => first.Initialize(typeof(ScopedProxy), null, _container),
-                "Disposing the scoped resolution token must dispose scoped instances.");
-            Assert.That(first.CleanupCalled, Is.False,
-                "Scoped proxies created only for resolution were never initialized, so user cleanup must not run.");
-        }
+        // Resolve_ScopedProxyWithinScopedResolutionScope_ReusesAndDisposesInstance was removed
+        // here: it exercised the v1 ambient BeginScopedResolutionScope() mechanism, which the
+        // Scoped lifetime redesign replaces with per-injectee ownership (see
+        // InternalSpecs/Architecture/SCOPED_LIFETIME_REDESIGN.md). Equivalent and more complete
+        // coverage - dedicated-instance-per-owner, recursive injection, lifecycle callbacks,
+        // exactly-once disposal on the owner's real teardown - now lives in
+        // Tests/Scenarios/ScopedLifetime/.
     }
 }

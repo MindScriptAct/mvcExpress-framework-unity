@@ -3,7 +3,7 @@
 namespace mvcExpress.Internal.Initialization
 {
     /// <summary>
-    /// Immutable snapshot of a <c>[Register]</c> attribute applied to a <see cref="Proxy"/> or
+    /// Immutable snapshot of a <c>[Register]</c> attribute applied to a <see cref="Proxies"/> or
     /// <see cref="ProxyBehaviour"/> type, captured once during assembly scanning.
     /// </summary>
     /// <remarks>
@@ -245,7 +245,7 @@ namespace mvcExpress.Internal.Initialization
         /// </summary>
         public Type ViewType { get; }
 
-        /// <summary>True when the concrete type inherits from <see cref="Proxy"/> or <see cref="ProxyBehaviour"/>.</summary>
+        /// <summary>True when the concrete type inherits from <see cref="Proxies"/> or <see cref="ProxyBehaviour"/>.</summary>
         public bool IsProxy { get; }
 
         /// <summary>True when the concrete type inherits from <see cref="UnityEngine.MonoBehaviour"/> (resolved to a scene instance rather than instantiated via <c>Activator.CreateInstance</c>).</summary>

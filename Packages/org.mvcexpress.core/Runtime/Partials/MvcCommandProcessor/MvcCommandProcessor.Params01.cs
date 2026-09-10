@@ -296,6 +296,9 @@ namespace mvcExpress.Internal.Commands
         /// </summary>
         public void Run<TCommand, T1>(T1 p1) where TCommand : Command<T1>, new()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            ValidateMainThreadForDirectExecution();
+#endif
             var pool = GetOrCreatePool<TCommand>(0);
             ExecuteCommandDirect1<TCommand, T1>(pool, p1);
         }
@@ -306,6 +309,9 @@ namespace mvcExpress.Internal.Commands
         /// </summary>
         public async Task RunAsync<TCommand, T1>(T1 p1) where TCommand : CommandAsync<T1>, new()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            ValidateMainThreadForDirectExecution();
+#endif
             var pool = GetOrCreatePool<TCommand>(0);
             await ExecuteCommandDirectAsync1<TCommand, T1>(pool, p1);
         }

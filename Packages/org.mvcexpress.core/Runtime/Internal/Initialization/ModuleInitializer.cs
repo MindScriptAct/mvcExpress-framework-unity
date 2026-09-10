@@ -3,6 +3,7 @@ using mvcExpress.Internal.DependencyInjection;
 using mvcExpress.Internal.Messaging;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using mvcExpress.Logging;
 using UnityEngine;
@@ -78,6 +79,13 @@ namespace mvcExpress.Internal.Initialization
     ///
     /// Breaking the order causes hard-to-diagnose injection failures because actors
     /// attempt to resolve dependencies that have not yet been registered.
+    ///
+    /// Invalid attribute-driven registration ([Register]/[Bind]/[Attach]) does not stop the pass
+    /// early - every phase still attempts everything it can - but every failure found along the
+    /// way is collected and thrown together as one <see cref="MvcCompositionException"/> once the
+    /// pass completes, so a broken module never finishes initialization silently. See
+    /// <see cref="RecordCompositionFailure"/> and <see cref="ThrowIfCompositionFailuresRecorded"/>.
+    ///
     /// This class is internal; MvcModule is the only consumer.
     /// </remarks>
     internal sealed class ModuleInitializer
@@ -114,6 +122,10 @@ namespace mvcExpress.Internal.Initialization
         // Attribute-registered proxies are tracked so the MvcConsole can display the registration
         // source for each proxy in the architecture view.
         private readonly List<object> _attributeRegisteredProxies = new List<object>();
+
+        // Attribute registration failures found so far this pass. Never [Conditional] - must fill
+        // in a release build too, so ThrowIfCompositionFailuresRecorded() can still abort there.
+        private readonly List<string> _compositionFailures = new List<string>();
 
         /// <summary>
         /// Current initialization phase.
@@ -177,8 +189,14 @@ namespace mvcExpress.Internal.Initialization
         /// Calling again after failure throws immediately - a failed module cannot be re-initialized.
         /// Any exception during a phase sets the phase to <see cref="InitializationPhase.Failed"/>
         /// and re-throws after scheduling a deferred summary log (one frame later, so Unity's own
-        /// exception output appears first in the console).
+        /// exception output appears first in the console). This includes
+        /// <see cref="MvcCompositionException"/>, thrown once after phase 5 if any attribute
+        /// registration failed validation along the way - see
+        /// <see cref="ThrowIfCompositionFailuresRecorded"/>.
         /// </remarks>
+        /// <exception cref="MvcCompositionException">
+        /// One or more [Register]/[Bind]/[Attach] attribute registrations were invalid.
+        /// </exception>
         internal void Initialize()
         {
             // Prevent re-initialization or initialization while in progress
@@ -233,6 +251,11 @@ namespace mvcExpress.Internal.Initialization
                 // Phase 5: View Layer (Mediators)
                 TransitionToPhase(InitializationPhase.Mediators);
                 InitializeMediators();
+
+                // Everything was attempted - now abort if any of it was invalid, reporting every
+                // failure at once instead of just the first. Handled by the catch below like any
+                // other initialization exception.
+                ThrowIfCompositionFailuresRecorded();
 
                 // Mark as completed
                 TransitionToPhase(InitializationPhase.Initialized);
@@ -299,6 +322,23 @@ namespace mvcExpress.Internal.Initialization
                 MvcDebug.LogError(_pendingErrorSummary);
                 _pendingErrorSummary = null;
             }
+        }
+
+        // Call alongside (not instead of) MvcDebug.LogError/LogWarning at a soft-skip site - this
+        // is what makes the failure fatal once the pass ends, in every build, not just the editor.
+        private void RecordCompositionFailure(string message)
+        {
+            _compositionFailures.Add(message);
+        }
+
+        // Called once, at the end of the pass, so every phase gets a chance to attempt everything
+        // first - not called per-site, or the module would stop at the first problem it finds.
+        private void ThrowIfCompositionFailuresRecorded()
+        {
+            if (_compositionFailures.Count == 0)
+                return;
+
+            throw new MvcCompositionException(_moduleType.Name, _compositionFailures);
         }
 
         /// <summary>
@@ -426,8 +466,13 @@ namespace mvcExpress.Internal.Initialization
             // A dual-scope registration (e.g. Register(svc).ToLogic().ToView()) stores the same
             // instance under two different container keys, so EnumerateAllInstances yields it twice.
             // Without dedup this loop would inject it, call OnInitialized(), and add it to
-            // _lifecycleServices twice - so OnCleanup() fires twice too at teardown (see M2).
-            var processedInstances = new HashSet<object>();
+            // _lifecycleServices twice - so OnCleanup() fires twice too at teardown.
+            // ReferenceIdentityComparer.Instance is required, not the default comparer:
+            // two distinct services whose type overrides Equals/GetHashCode (or a boxed struct,
+            // which gets structural equality for free) would otherwise collide here, and the second
+            // one would be silently skipped - never injected, never OnInitialized(), never added to
+            // _lifecycleServices - even though it is a live, separately-registered instance.
+            var processedInstances = new HashSet<object>(MvcDiContainer.ReferenceIdentityComparer.Instance);
 
             foreach (var instance in _diContainer.EnumerateAllInstances())
             {
@@ -442,8 +487,9 @@ namespace mvcExpress.Internal.Initialization
                     continue;
                 }
 
-                // Skip attribute-registered services (they're handled separately - step 5)
-                if (_attributeRegisteredServices.Contains(instance))
+                // Skip attribute-registered services (they're handled separately - step 5).
+                // Reference-identity comparer for the same reason as processedInstances above.
+                if (_attributeRegisteredServices.Contains(instance, MvcDiContainer.ReferenceIdentityComparer.Instance))
                 {
                     continue;
                 }
@@ -576,11 +622,13 @@ namespace mvcExpress.Internal.Initialization
 
                 if (resolution.Kind == MonoBehaviourResolutionKind.Ambiguous)
                 {
-                    MvcDebug.LogError(
+                    var failureMessage =
                         $"Proxy '{proxyType.FullName}' has [Register] attribute but " +
                         $"{resolution.Conflicts.Length} instances exist in module '{_moduleType}''s hierarchy: " +
                         $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
-                        $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
+                        $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.";
+                    MvcDebug.LogError(failureMessage);
+                    RecordCompositionFailure(failureMessage);
                     return;
                 }
 
@@ -601,25 +649,35 @@ namespace mvcExpress.Internal.Initialization
                     proxyInstance = Activator.CreateInstance(proxyType);
                     if (proxyInstance == null)
                     {
-                        MvcDebug.LogError(
+                        var failureMessage =
                             $"Failed to create instance of proxy '{proxyType.FullName}' " +
-                            $"in module '{_moduleType}'. Skipping registration.");
+                            $"in module '{_moduleType}'. Skipping registration.";
+                        MvcDebug.LogError(failureMessage);
+                        RecordCompositionFailure(failureMessage);
                         return;
                     }
                 }
                 catch (Exception ex)
                 {
-                    MvcDebug.LogError(
+                    // Activator.CreateInstance wraps a throwing constructor in TargetInvocationException -
+                    // unwrap it, or the recorded message is just "Exception has been thrown by the
+                    // target of an invocation" with no hint of the actual cause.
+                    var inner = ex is TargetInvocationException ? ex.InnerException ?? ex : ex;
+                    var failureMessage =
                         $"Failed to create instance of proxy '{proxyType.FullName}' " +
-                        $"in module '{_moduleType}': {ex.Message}");
+                        $"in module '{_moduleType}': {inner.Message}";
+                    MvcDebug.LogError(failureMessage);
+                    RecordCompositionFailure(failureMessage);
                     return;
                 }
             }
             else
             {
-                MvcDebug.LogError(
+                var failureMessage =
                     $"Type '{proxyType.FullName}' has [Register] attribute but is not a Proxy or ProxyBehaviour. " +
-                    $"Skipping registration for module '{_moduleType}'.");
+                    $"Skipping registration for module '{_moduleType}'.";
+                MvcDebug.LogError(failureMessage);
+                RecordCompositionFailure(failureMessage);
                 return;
             }
 
@@ -693,8 +751,10 @@ namespace mvcExpress.Internal.Initialization
             }
             catch (Exception ex)
             {
-                MvcDebug.LogError(
-                    $"Failed to register proxy '{proxyType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+                var failureMessage =
+                    $"Failed to register proxy '{proxyType.FullName}' via attribute in module '{_moduleType}': {ex.Message}";
+                MvcDebug.LogError(failureMessage);
+                RecordCompositionFailure(failureMessage);
             }
         }
 #endif
@@ -762,11 +822,13 @@ namespace mvcExpress.Internal.Initialization
 
                     if (resolution.Kind == MonoBehaviourResolutionKind.Ambiguous)
                     {
-                        MvcDebug.LogError(
+                        var failureMessage =
                             $"Service '{serviceType.FullName}' has [Register] attribute but " +
                             $"{resolution.Conflicts.Length} instances exist in module '{_moduleType}''s hierarchy: " +
                             $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
-                            $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
+                            $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.";
+                        MvcDebug.LogError(failureMessage);
+                        RecordCompositionFailure(failureMessage);
                         return;
                     }
 
@@ -782,8 +844,10 @@ namespace mvcExpress.Internal.Initialization
                 }
                 catch (Exception ex)
                 {
-                    MvcDebug.LogError(
-                        $"Failed to register service '{serviceType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+                    var failureMessage =
+                        $"Failed to register service '{serviceType.FullName}' via attribute in module '{_moduleType}': {ex.Message}";
+                    MvcDebug.LogError(failureMessage);
+                    RecordCompositionFailure(failureMessage);
                     return;
                 }
             }
@@ -795,18 +859,25 @@ namespace mvcExpress.Internal.Initialization
                 }
                 catch (Exception ex)
                 {
-                    MvcDebug.LogError(
+                    // See the matching comment on the proxy path above - Activator.CreateInstance
+                    // wraps a throwing constructor, so the inner exception is the real cause.
+                    var inner = ex is TargetInvocationException ? ex.InnerException ?? ex : ex;
+                    var failureMessage =
                         $"Failed to create instance of service '{serviceType.FullName}' " +
-                        $"in module '{_moduleType}': {ex.Message}");
+                        $"in module '{_moduleType}': {inner.Message}";
+                    MvcDebug.LogError(failureMessage);
+                    RecordCompositionFailure(failureMessage);
                     return;
                 }
             }
 
             if (serviceInstance == null)
             {
-                MvcDebug.LogError(
+                var failureMessage =
                     $"Failed to create instance of service '{serviceType.FullName}' " +
-                    $"in module '{_moduleType}'. Skipping registration.");
+                    $"in module '{_moduleType}'. Skipping registration.";
+                MvcDebug.LogError(failureMessage);
+                RecordCompositionFailure(failureMessage);
                 return;
             }
 
@@ -864,8 +935,10 @@ namespace mvcExpress.Internal.Initialization
             }
             catch (Exception ex)
             {
-                MvcDebug.LogError(
-                    $"Failed to register service '{serviceType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+                var failureMessage =
+                    $"Failed to register service '{serviceType.FullName}' via attribute in module '{_moduleType}': {ex.Message}";
+                MvcDebug.LogError(failureMessage);
+                RecordCompositionFailure(failureMessage);
             }
         }
 #endif
@@ -910,8 +983,10 @@ namespace mvcExpress.Internal.Initialization
                 }
                 catch (Exception ex)
                 {
-                    MvcDebug.LogError(
-                        $"Failed to bind command '{metadata.CommandType.FullName}' to message '{metadata.MessageType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+                    var failureMessage =
+                        $"Failed to bind command '{metadata.CommandType.FullName}' to message '{metadata.MessageType.FullName}' via attribute in module '{_moduleType}': {ex.Message}";
+                    MvcDebug.LogError(failureMessage);
+                    RecordCompositionFailure(failureMessage);
                 }
             }
 #endif
@@ -1022,8 +1097,10 @@ namespace mvcExpress.Internal.Initialization
                 {
                     if (!_moduleContext.TryGetMediatorPrefab(metadata.MediatorType, out var prefab) || prefab == null)
                     {
-                        MvcDebug.LogError(
-                            $"View prefab not found for mediator '{metadata.MediatorType.FullName}' in module '{_moduleType}'. Add it to a ViewPrefabCatalog or module MediatorRegistry.");
+                        var failureMessage =
+                            $"View prefab not found for mediator '{metadata.MediatorType.FullName}' in module '{_moduleType}'. Add it to a ViewPrefabCatalog or module MediatorRegistry.";
+                        MvcDebug.LogError(failureMessage);
+                        RecordCompositionFailure(failureMessage);
                         return;
                     }
 
@@ -1034,8 +1111,10 @@ namespace mvcExpress.Internal.Initialization
                     mediatorInstance = instance.GetComponent(metadata.MediatorType) as MediatorBehaviour;
                     if (mediatorInstance == null)
                     {
-                        MvcDebug.LogError(
-                            $"View prefab '{prefab.name}' does not contain mediator component '{metadata.MediatorType.FullName}' in module '{_moduleType}'.");
+                        var failureMessage =
+                            $"View prefab '{prefab.name}' does not contain mediator component '{metadata.MediatorType.FullName}' in module '{_moduleType}'.";
+                        MvcDebug.LogError(failureMessage);
+                        RecordCompositionFailure(failureMessage);
                         UnityEngine.Object.Destroy(instance);
                         return;
                     }
@@ -1046,8 +1125,10 @@ namespace mvcExpress.Internal.Initialization
                     var prefab = UnityEngine.Resources.Load<GameObject>(metadata.PrefabPath);
                     if (prefab == null)
                     {
-                        MvcDebug.LogError(
-                            $"Prefab not found at path '{metadata.PrefabPath}' for mediator '{metadata.MediatorType.FullName}' in module '{_moduleType}'.");
+                        var failureMessage =
+                            $"Prefab not found at path '{metadata.PrefabPath}' for mediator '{metadata.MediatorType.FullName}' in module '{_moduleType}'.";
+                        MvcDebug.LogError(failureMessage);
+                        RecordCompositionFailure(failureMessage);
                         return;
                     }
 
@@ -1056,32 +1137,64 @@ namespace mvcExpress.Internal.Initialization
 
                     if (mediatorInstance == null)
                     {
-                        MvcDebug.LogError(
-                            $"Prefab at '{metadata.PrefabPath}' does not contain component '{metadata.MediatorType.FullName}' in module '{_moduleType}'.");
+                        var failureMessage =
+                            $"Prefab at '{metadata.PrefabPath}' does not contain component '{metadata.MediatorType.FullName}' in module '{_moduleType}'.";
+                        MvcDebug.LogError(failureMessage);
+                        RecordCompositionFailure(failureMessage);
                         UnityEngine.Object.Destroy(instance);
                         return;
                     }
                 }
-                // Strategy 3: Find existing instance in scene
+                // Strategy 3: Find existing instance in the owning module's own hierarchy.
+                // Scoped to _moduleContext.transform rather than a global scene search:
+                // FindAnyObjectByType/FindObjectOfType searched the entire scene, so in
+                // a multi-module scene this could attach a mediator belonging to a DIFFERENT module,
+                // and candidate choice among several scene instances was non-deterministic. Reuses the
+                // same hierarchy-scoped, fail-on-ambiguity resolver already used for [Register]
+                // Proxy/Service attribute attachment above and in MvcFacade's global equivalent.
                 else if (metadata.FindInScene)
                 {
-#if UNITY_2023_1_OR_NEWER
-                    mediatorInstance = UnityEngine.Object.FindAnyObjectByType(metadata.MediatorType) as MediatorBehaviour;
-#else
-                    mediatorInstance = UnityEngine.Object.FindObjectOfType(metadata.MediatorType) as MediatorBehaviour;
-#endif
+                    var resolution = AttributeMonoBehaviourResolver.Resolve(
+                        _moduleContext.transform,
+                        metadata.MediatorType,
+                        parentContainer: null,
+                        preTracked: null,
+                        createIfMissing: false);
 
-                    if (mediatorInstance == null)
+                    if (resolution.Kind == MonoBehaviourResolutionKind.Ambiguous)
                     {
-                        MvcDebug.LogWarning(
-                            $"Mediator '{metadata.MediatorType.FullName}' not found in scene for module '{_moduleType}'.");
+                        var failureMessage =
+                            $"Mediator '{metadata.MediatorType.FullName}' has [Attach(FindInScene = true)] " +
+                            $"but {resolution.Conflicts.Length} instances exist in module '{_moduleType}''s " +
+                            $"hierarchy: {string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
+                            $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping attachment.";
+                        MvcDebug.LogError(failureMessage);
+                        RecordCompositionFailure(failureMessage);
                         return;
                     }
+
+                    if (resolution.Kind == MonoBehaviourResolutionKind.NotFound)
+                    {
+                        // Promoted from LogWarning to fatal: FindInScene claims the mediator belongs here,
+                        // so its absence is a missing/misconfigured scene, not an optional one.
+                        var failureMessage =
+                            $"Mediator '{metadata.MediatorType.FullName}' not found in module '{_moduleType}''s " +
+                            $"hierarchy for [Attach(FindInScene = true)].";
+                        MvcDebug.LogError(failureMessage);
+                        RecordCompositionFailure(failureMessage);
+                        return;
+                    }
+
+                    mediatorInstance = resolution.Instance as MediatorBehaviour;
                 }
                 else
                 {
-                    MvcDebug.LogWarning(
-                        $"Mediator '{metadata.MediatorType.FullName}' has [Attach] attribute but no PrefabPath or FindInScene flag in module '{_moduleType}'.");
+                    // Promoted from LogWarning to a fatal composition failure: [Attach] with neither
+                    // PrefabPath nor FindInScene set is an authoring mistake, not a valid configuration.
+                    var failureMessage =
+                        $"Mediator '{metadata.MediatorType.FullName}' has [Attach] attribute but no PrefabPath or FindInScene flag in module '{_moduleType}'.";
+                    MvcDebug.LogError(failureMessage);
+                    RecordCompositionFailure(failureMessage);
                     return;
                 }
 
@@ -1106,8 +1219,10 @@ namespace mvcExpress.Internal.Initialization
             }
             catch (Exception ex)
             {
-                MvcDebug.LogError(
-                    $"Failed to attach mediator '{metadata.MediatorType.FullName}' via attribute in module '{_moduleType}': {ex.Message}");
+                var failureMessage =
+                    $"Failed to attach mediator '{metadata.MediatorType.FullName}' via attribute in module '{_moduleType}': {ex.Message}";
+                MvcDebug.LogError(failureMessage);
+                RecordCompositionFailure(failureMessage);
             }
         }
 
@@ -1147,6 +1262,17 @@ namespace mvcExpress.Internal.Initialization
         internal MediatorRegistrar MediatorRegistrar => _mediatorRegistrar;
 
         /// <summary>
+        /// Tracks a plain <see cref="IMvcLifecycle"/> service registered dynamically after normal
+        /// initialization (e.g. from a Command via <see cref="CommandContainerApi.Register{T}"/>),
+        /// so <see cref="CleanupServices"/> also calls its <see cref="IMvcLifecycle.OnCleanup"/> at
+        /// module teardown - matching setup-time services.
+        /// </summary>
+        internal void TrackDynamicLifecycleService(IMvcLifecycle service)
+        {
+            if (service != null) _lifecycleServices.Add(service);
+        }
+
+        /// <summary>
         /// Calls <see cref="IMvcLifecycle.OnCleanup"/> on every service that opted in to the
         /// lifecycle, in reverse registration order (last registered, first cleaned up).
         /// Must be called before the DI container is disposed.
@@ -1161,9 +1287,21 @@ namespace mvcExpress.Internal.Initialization
                 }
                 catch (Exception ex)
                 {
+                    // Also logged via Unity's own Debug.LogException,
+                    // unconditionally - a teardown exception must be visible even in a clean
+                    // release build, unlike routine diagnostic logging.
                     MvcDebug.LogError(
                         $"[ModuleInitializer] Service '{_lifecycleServices[i].GetType().FullName}' " +
                         $"threw during OnCleanup in module '{_moduleType}': {ex.Message}");
+                    UnityEngine.Debug.LogException(ex);
+                }
+
+                var owner = _lifecycleServices[i];
+                _diContainer.ReleaseScopedInstancesFor(owner);
+                var globalContainer = MvcFacade.GlobalContainerOrNull;
+                if (globalContainer != null && !ReferenceEquals(globalContainer, _diContainer))
+                {
+                    globalContainer.ReleaseScopedInstancesFor(owner);
                 }
             }
             _lifecycleServices.Clear();
@@ -1355,7 +1493,7 @@ namespace mvcExpress.Internal.Initialization
                 try
                 {
                     // Async is now inferred from command type. MvcAsyncCommandBase (not
-                    // CommandAsync) is the common base for every async arity - see L2.
+                    // CommandAsync) is the common base for every async arity.
                     var isAsync = typeof(MvcAsyncCommandBase).IsAssignableFrom(cmdType);
 
                     BindFromRegistry(cmdType, msgType, isAsync, (uint)Math.Max(0, b.PoolSize));

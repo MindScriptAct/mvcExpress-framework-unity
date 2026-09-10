@@ -1,6 +1,6 @@
 using mvcExpress.Internal.DependencyInjection;
 using mvcExpress.Internal.Messaging;
-using mvcExpress.Internal.Proxy;
+using mvcExpress.Internal.Proxies;
 using mvcExpress.Logging;
 using System;
 using System.Collections.Generic;
@@ -132,9 +132,44 @@ namespace mvcExpress.Internal.Initialization
         /// <summary>
         /// Cleanup all registered global proxies during facade destruction.
         /// </summary>
+        /// <remarks>
+        /// Deliberately does not call each proxy's own cleanup - during real facade destruction,
+        /// Unity's own hierarchy-destroy cascade already calls <c>ProxyBehaviour.OnDestroy()</c>
+        /// (which calls <c>OnCleanup()</c>) independently for every child proxy GameObject. Doing
+        /// so again here would double-invoke <c>OnCleanup()</c>. See
+        /// <see cref="ResetTrackedProxiesForContainerClear"/> for the separate, non-destruction
+        /// reset path that does need to invoke it explicitly.
+        /// </remarks>
         public void Cleanup()
         {
             _registeredProxyBehaviours.Clear();
+        }
+
+        /// <summary>
+        /// Runs each tracked proxy's <see cref="ProxyBehaviour.ResetForContainerClear"/> (its
+        /// <c>OnCleanup()</c>, scoped-dependency release, and initialized-flag reset) before the
+        /// global container is cleared. Unlike <see cref="Cleanup"/>,
+        /// this is only ever called from <c>MvcFacade.ClearGlobalContainer()</c>'s soft-reset path,
+        /// never mixed with real facade destruction, so there is no risk of double-invoking
+        /// <c>OnCleanup()</c> via Unity's own destroy cascade.
+        /// </summary>
+        public void ResetTrackedProxiesForContainerClear()
+        {
+            for (int i = 0; i < _registeredProxyBehaviours.Count; i++)
+            {
+                var proxy = _registeredProxyBehaviours[i];
+                if (proxy == null) continue;
+
+                try
+                {
+                    proxy.ResetForContainerClear();
+                }
+                catch (Exception ex)
+                {
+                    MvcDebug.LogError($"[MvcExpress] Global proxy '{proxy.GetType().FullName}' threw during OnCleanup: {ex.Message}");
+                    Debug.LogException(ex);
+                }
+            }
         }
     }
 }

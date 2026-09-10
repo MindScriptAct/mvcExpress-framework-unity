@@ -706,8 +706,7 @@ namespace mvcExpress.Logging
         }
 
         // Exposes ShouldLog to callers that need to gate expensive diagnostic work (e.g. a
-        // StackTrace capture) before even reaching a Log* call, not just the log line itself -
-        // see L5.
+        // StackTrace capture) before even reaching a Log* call, not just the log line itself.
         internal static bool ShouldLogFor(mvcExpress.MvcModule module) => ShouldLog(module);
 
         // Editor-only: resolves a file system path for a type so the console can display a

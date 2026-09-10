@@ -236,11 +236,19 @@ namespace mvcExpress.Editor.Inspectors
             DrawInvokeSection(proxy, proxyType);
         }
 
+        // DrawTopHeader used to allocate both GUIStyles fresh on every call. RequiresConstantRepaint() returns
+        // true for any proxy/service debug inspector during play mode, so this ran on every editor
+        // repaint - potentially dozens of times a second - for as long as that inspector stayed
+        // open. Lazily cached once (not created in a static initializer - EditorStyles.miniLabel
+        // isn't guaranteed ready that early) and reused for the rest of the Editor session.
+        private static GUIStyle _topHeaderBoxStyle;
+        private static GUIStyle _topHeaderRightAlignedLabelStyle;
+
         private static void DrawTopHeader(object proxy, System.Type proxyType)
         {
             var rect = EditorGUILayout.GetControlRect(false, EditorGUIUtility.singleLineHeight);
-            var bg = new GUIStyle("HelpBox") { padding = new RectOffset(4, 4, 2, 2) };
-            GUI.Box(rect, GUIContent.none, bg);
+            _topHeaderBoxStyle ??= new GUIStyle("HelpBox") { padding = new RectOffset(4, 4, 2, 2) };
+            GUI.Box(rect, GUIContent.none, _topHeaderBoxStyle);
 
             var contentRect = new Rect(rect.x + 4f, rect.y + 1f, rect.width - 8f, rect.height - 2f);
 
@@ -265,8 +273,8 @@ namespace mvcExpress.Editor.Inspectors
 
             if (TryGetModuleName(proxy, out var moduleName))
             {
-                var rightAligned = new GUIStyle(EditorStyles.miniLabel) { alignment = TextAnchor.MiddleRight };
-                EditorGUI.LabelField(rightRect, moduleName ?? "", rightAligned);
+                _topHeaderRightAlignedLabelStyle ??= new GUIStyle(EditorStyles.miniLabel) { alignment = TextAnchor.MiddleRight };
+                EditorGUI.LabelField(rightRect, moduleName ?? "", _topHeaderRightAlignedLabelStyle);
             }
         }
 

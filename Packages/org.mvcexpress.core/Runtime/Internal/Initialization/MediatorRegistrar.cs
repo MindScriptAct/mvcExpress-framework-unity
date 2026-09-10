@@ -192,7 +192,7 @@ namespace mvcExpress.Internal.Initialization
             // LOG: Runtime mediator attachment (Controller action)
             // Gate the StackTrace(true) capture itself, not just the log call - ShouldLogFor
             // mirrors the same check LogMediatorAttached does internally, so when logging is
-            // disabled this expensive capture is skipped entirely instead of running for nothing - see L5.
+            // disabled this expensive capture is skipped entirely instead of running for nothing.
             if (mvcExpress.Logging.MvcLogInternal.ShouldLogFor(_moduleContext))
             {
                 var caller = new System.Diagnostics.StackTrace(true).GetFrame(2); // Skip AddRuntimeMediator and AttachMediator
@@ -242,11 +242,26 @@ namespace mvcExpress.Internal.Initialization
             // Explicitly clean up runtime mediators. These may live outside the module's
             // GameObject hierarchy, so Unity's OnDestroy chain alone cannot be relied on.
             // CleanupMediator() is idempotent - safe to call even if Unity fires OnDestroy later.
+            // Each call is individually guarded (matching ProxyRegistrar.Cleanup()'s pattern) so
+            // one mediator's throwing OnCleanup() cannot abort the loop and strand every mediator
+            // after it, or the two Clear() calls below (COR-16).
             for (int i = _runtimeMediators.Count - 1; i >= 0; i--)
             {
                 var mediator = _runtimeMediators[i];
-                if (mediator != null)
+                if (mediator == null) continue;
+
+                try
+                {
                     mediator.CleanupMediator();
+                }
+                catch (Exception ex)
+                {
+                    // Also logged via Unity's own Debug.LogException,
+                    // unconditionally - a teardown exception must be visible even in a clean
+                    // release build, unlike routine diagnostic logging.
+                    MvcDebug.LogError($"Error cleaning up mediator '{mediator.name}': {ex.Message}");
+                    Debug.LogException(ex);
+                }
             }
             _runtimeMediators.Clear();
 

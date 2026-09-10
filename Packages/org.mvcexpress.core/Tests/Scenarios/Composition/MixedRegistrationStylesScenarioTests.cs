@@ -139,9 +139,12 @@ namespace mvcExpress.Tests.Scenarios
             var inspectorMediator = viewGo.AddComponent<InspectorSceneMediator>();
             SetPrivateField(mediatorRegistry, "_sceneMediators", new MediatorBehaviour[] { inspectorMediator });
 
-            // [Attach(FindInScene = true)] resolves via Object.FindObjectOfType, so the target
-            // instance must already exist in the scene before the module initializes.
+            // [Attach(FindInScene = true)] resolves via AttributeMonoBehaviourResolver, scoped to
+            // the owning module's own hierarchy - so the target instance
+            // must already exist as a descendant of the module's transform before it initializes,
+            // not merely anywhere in the scene.
             _attachedMediatorGo = new GameObject("AttributeAttachedMediator");
+            _attachedMediatorGo.transform.SetParent(_moduleGo.transform);
             _attachedMediatorGo.AddComponent<AttributeAttachedMediator>();
 
             _moduleGo.AddComponent<MixedStylesModule>();

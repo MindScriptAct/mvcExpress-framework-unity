@@ -53,7 +53,10 @@ namespace mvcExpress
             _module.EnsureCoreServicesInitialized();
             WarnForCodeRegistration(instance);
             var builder = MvcFacade.Global.Register(instance);
-            InitializeRegisteredInstance(instance);
+            // Deferred until the builder chain commits as non-scoped - see
+            // RegistrationBuilder<T>.OnNonScopedCommitted. A .AsScoped() chain must never
+            // initialize this throwaway seed instance.
+            builder.OnNonScopedCommitted = InitializeRegisteredInstance;
             return builder;
         }
 #endif
@@ -86,7 +89,8 @@ namespace mvcExpress
             _module.EnsureCoreServicesInitialized();
             WarnForCodeRegistration(instance);
             var builder = MvcFacade.Global.Register(instance, type);
-            InitializeRegisteredInstance(instance);
+            // See the matching comment on Register<T> above.
+            builder.OnNonScopedCommitted = InitializeRegisteredInstance;
             return builder;
         }
 #endif
@@ -144,7 +148,7 @@ namespace mvcExpress
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T Resolve<T>()
         {
-            return MvcFacade.Global.Resolve<T>();
+            return MvcFacade.Global.Resolve<T>(caller: _module);
         }
 
         /// <summary>
@@ -156,7 +160,7 @@ namespace mvcExpress
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryResolve<T>(out T value)
         {
-            return MvcFacade.Global.TryResolve<T>(out value);
+            return MvcFacade.Global.TryResolve<T>(out value, caller: _module);
         }
 
         // Global proxies and IMvcLifecycle services are wired immediately because
@@ -179,6 +183,7 @@ namespace mvcExpress
             {
                 MvcInjectionUtility.InjectMembers(instance, MvcFacade.Global, useViewScope: false);
                 initializable.OnInitialized();
+                MvcFacade.FacadeInstance.TrackGlobalLifecycleService(initializable);
             }
         }
 

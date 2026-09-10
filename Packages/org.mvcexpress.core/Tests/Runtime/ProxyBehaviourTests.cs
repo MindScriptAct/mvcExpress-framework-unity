@@ -1,3 +1,5 @@
+using System;
+using System.Reflection;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -21,6 +23,12 @@ namespace mvcExpress.Tests
 
             protected override void OnInitialized() => OnInitializedCallCount++;
             protected override void OnCleanup()     => OnCleanupCallCount++;
+        }
+
+        // Throws from OnInitialized() to exercise the failed-initialization path.
+        private class ThrowingOnInitializedProxyBehaviour : ProxyBehaviour
+        {
+            protected override void OnInitialized() => throw new InvalidOperationException("Boom.");
         }
 
         // Module stub that skips Awake/OnDestroy entirely so the framework singleton
@@ -115,6 +123,29 @@ namespace mvcExpress.Tests
 
             Assert.AreEqual(1, _proxy.OnInitializedCallCount,
                 "OnInitialized must not fire more than once even when CompleteInitialization is called twice.");
+        }
+
+        [Test]
+        public void CompleteInitialization_OnInitializedThrows_ProxyNotLeftMarkedInitialized()
+        {
+            var go = new GameObject("ThrowingOnInitializedProxyBehaviour");
+            var proxy = go.AddComponent<ThrowingOnInitializedProxyBehaviour>();
+            try
+            {
+                proxy.Initialize(_module, _container, _messageBus, deferOnInitialized: true);
+
+                Assert.Throws<InvalidOperationException>(() => proxy.CompleteInitialization());
+
+                var initializedField = typeof(ProxyBehaviour).GetField("_initialized", BindingFlags.Instance | BindingFlags.NonPublic);
+                Assert.IsFalse((bool)initializedField.GetValue(proxy),
+                    "A ProxyBehaviour whose OnInitialized() throws must not be left marked as " +
+                    "initialized - otherwise a later retry silently no-ops instead of " +
+                    "re-attempting initialization.");
+            }
+            finally
+            {
+                Object.DestroyImmediate(go);
+            }
         }
 
         [Test]

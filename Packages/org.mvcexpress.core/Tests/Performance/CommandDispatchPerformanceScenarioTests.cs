@@ -15,12 +15,10 @@ using Object = UnityEngine.Object;
 namespace mvcExpress.Tests.Performance
 {
     /// <summary>
-    /// Command dispatch performance/allocation regression tests, per the implementation audit's
-    /// suggested measurement (InternalSpecs/ReleaseAudit_260705/04_command-path-performance.md,
-    /// section 4): a pooled sync command dispatch should be allocation-free after warmup (C1/C3),
-    /// the documented poolSize-0 default should still allocate every dispatch (a canary, not a
-    /// defect), and a mediator publish through its wrapper delegate should not allocate anything
-    /// beyond the one-time subscribe-time closure (M8).
+    /// Command dispatch performance/allocation regression tests: a pooled sync command dispatch
+    /// should be allocation-free after warmup, the documented poolSize-0 default should still
+    /// allocate every dispatch (a canary, not a defect), and a mediator publish through its
+    /// wrapper delegate should not allocate anything beyond the one-time subscribe-time closure.
     /// </summary>
     /// <remarks>
     /// <b>Measurement environment note:</b> <c>GC.GetAllocatedBytesForCurrentThread()</c> was
@@ -131,7 +129,7 @@ namespace mvcExpress.Tests.Performance
             protected override void OnInitialized()
             {
                 // Subscribing here allocates the wrapper closure exactly once (dev-build path)
-                // or binds the raw handler directly (release path, per M8) - either way this
+                // or binds the raw handler directly (release path) - either way this
                 // happens before the measurement window in every test that uses this mediator.
                 Messenger.Subscribe<MediatorDispatchMessage>(OnMediatorMessage);
             }
@@ -222,7 +220,7 @@ namespace mvcExpress.Tests.Performance
             Assert.That(statsAfterDispatch[0].PoolStats.TotalCreated, Is.EqualTo(1),
                 "Only the warmup dispatch should have created a command instance; all " +
                 MeasuredIterations + " measured dispatches must reuse that same pooled instance " +
-                "(C3) rather than creating new ones - this is the reliable allocation signal in " +
+                "rather than creating new ones - this is the reliable allocation signal in " +
                 "this test environment, independent of the (here, non-functional) byte counter.");
 #endif
         }
@@ -272,8 +270,8 @@ namespace mvcExpress.Tests.Performance
             var statsAfterDispatch = _processor.GetPoolStatistics();
             Assert.That(statsAfterDispatch[0].PoolStats.TotalCreated, Is.EqualTo(1),
                 "Only the warmup dispatch should have created a command instance; every measured " +
-                "dispatch must reuse that same pooled instance and its already-injected dependency " +
-                "(C3), not re-resolve DispatchService or allocate a fresh command.");
+                "dispatch must reuse that same pooled instance and its already-injected dependency, " +
+                "not re-resolve DispatchService or allocate a fresh command.");
 #endif
         }
 
@@ -340,7 +338,7 @@ namespace mvcExpress.Tests.Performance
             mediatorGo.transform.SetParent(_moduleGo.transform);
             var mediator = mediatorGo.AddComponent<WrapperDelegateMediator>();
             // OnInitialized() runs here and subscribes - in dev builds this allocates the
-            // tracker wrapper-closure exactly once (per audit finding M8); in release builds
+            // tracker wrapper-closure exactly once; in release builds
             // the raw handler is subscribed directly with no wrapper. Either way, this cost is
             // paid once, here, and is not part of the measured loop below.
             mediator.Initialize(_module, _container, _messageBus);
@@ -365,11 +363,11 @@ namespace mvcExpress.Tests.Performance
             // GC.GetAllocatedBytesForCurrentThread(), which is known to read back 0 in this test
             // environment regardless of real allocations - mirroring the same limitation already
             // present in the existing MessagingScenarioTests.StructMessage_HighFrequencyPublish_ZeroAllocation
-            // precedent this test was modeled on. It still documents the intended contract (M8) and
+            // precedent this test was modeled on. It still documents the intended contract and
             // will provide real signal in environments/runners where the counter functions.
             Assert.That(afterBytes - beforeBytes, Is.EqualTo(0),
                 "Per-publish dispatch through a mediator's subscription (whether via the dev-build " +
-                "wrapper delegate or the release-build raw handler, per finding M8) must not allocate " +
+                "wrapper delegate or the release-build raw handler) must not allocate " +
                 "anything beyond the one-time subscribe-time closure created in OnInitialized above. " +
                 "A non-zero delta here means the wrapper (or something else on the mediator delivery " +
                 "path) allocates per-delivery rather than per-subscribe.");

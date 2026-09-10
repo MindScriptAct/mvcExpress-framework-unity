@@ -180,8 +180,11 @@ namespace mvcExpress.Tests
         }
 
         [Test]
-        public void RegisterGlobal_DuplicateProxyBehaviourInstances_AreNotRegistered()
+        public void RegisterGlobal_DuplicateProxyBehaviourInstances_ThrowsCompositionException()
         {
+            // Ambiguous [RegisterGlobal] MonoBehaviour resolution is a fatal composition failure:
+            // the drain still attempts every group, but the recorded failure is then thrown as one
+            // aggregated MvcCompositionException instead of silently skipping just that type.
             var facade = CreateInactiveFacade();
 
             var go1 = new GameObject("Dup1");
@@ -197,17 +200,21 @@ namespace mvcExpress.Tests
             LogAssert.Expect(LogType.Error,
                 new System.Text.RegularExpressions.Regex("has 2 instances in the MvcFacade hierarchy"));
 
-            _ = MvcFacade.FacadeInstance;
-
-            var found = MvcFacade.Global.TryResolve<GlobalMockProxyBehaviour>(out _);
-
-            Assert.IsFalse(found,
-                "Ambiguous (2+ instance) MonoBehaviour registrations must be skipped, not arbitrarily resolved.");
+            var ex = Assert.Throws<MvcCompositionException>(() => { _ = MvcFacade.FacadeInstance; },
+                "Ambiguous (2+ instance) MonoBehaviour registrations must abort global initialization, not be silently skipped.");
+            StringAssert.Contains("has 2 instances in the MvcFacade hierarchy", ex.Message);
         }
 
         [Test]
-        public void RegisterGlobal_DuplicateInstances_DoNotAffectOtherGlobalRegistrations()
+        public void RegisterGlobal_DuplicateInstances_LeaveFacadePermanentlyUnusableUntilFixed()
         {
+            // Regression coverage for a correctness gap found while implementing the fix above:
+            // InitializeIfNeeded() only sets _initialized after a fully successful run, so without
+            // an explicit failure guard a SECOND access to the facade after a failed first attempt
+            // would silently re-run the whole sequence from scratch - re-invoking non-idempotent
+            // steps like RegisterGlobalServices()/RegisterGlobalProxies() - and hit the exact same
+            // ambiguity again. The facade must instead fail fast with the original cause, exactly
+            // like a module that already failed refuses to silently re-initialize.
             var facade = CreateInactiveFacade();
 
             var go1 = new GameObject("Dup1");
@@ -218,17 +225,16 @@ namespace mvcExpress.Tests
             go2.transform.SetParent(facade.transform, false);
             go2.AddComponent<GlobalMockProxyBehaviour>();
 
-            // Duplicate instances are expected to log an error; declare it so the test
-            // framework does not treat the expected log as a failure.
             LogAssert.Expect(LogType.Error,
                 new System.Text.RegularExpressions.Regex("has 2 instances in the MvcFacade hierarchy"));
 
-            _ = MvcFacade.FacadeInstance;
+            Assert.Throws<MvcCompositionException>(() => { _ = MvcFacade.FacadeInstance; });
 
-            var found = MvcFacade.Global.TryResolve<GlobalMockProxy>(out _);
-
-            Assert.IsTrue(found,
-                "A duplicate/ambiguous MonoBehaviour registration must not block unrelated [RegisterGlobal] types.");
+            // A second access must NOT silently retry (which would re-hit the same ambiguity and
+            // could re-run non-idempotent registration hooks) - it must fail fast instead.
+            var ex = Assert.Throws<System.InvalidOperationException>(() => { _ = MvcFacade.FacadeInstance; },
+                "A facade that already failed global initialization must refuse to silently retry.");
+            StringAssert.Contains("global initialization failed", ex.Message);
         }
     }
 }

@@ -6,6 +6,7 @@
 using mvcExpress.PerformanceHarness;
 using System.IO;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -21,7 +22,8 @@ namespace mvcExpress.Editor
     {
         private const string SceneDirectory = "Assets/PerformanceHarness";
         private const string ScenePath = SceneDirectory + "/ReleaseBenchmarkScene.unity";
-        private const string BuildOutputPath = "Builds/PerformanceHarness/ReleaseBenchmarkHarness.exe";
+        private const string MonoBuildOutputPath = "Builds/PerformanceHarness/Mono/ReleaseBenchmarkHarness.exe";
+        private const string Il2CppBuildOutputPath = "Builds/PerformanceHarness/IL2CPP/ReleaseBenchmarkHarness.exe";
 
         /// <summary>
         /// Ensures the benchmark scene exists (creating it programmatically if missing, since a
@@ -33,9 +35,26 @@ namespace mvcExpress.Editor
         [MenuItem("mvcExpress/Performance Harness/Build Release Benchmark Player")]
         public static void BuildReleaseBenchmarkPlayer()
         {
+            BuildBenchmarkPlayer(ScriptingImplementation.Mono2x, MonoBuildOutputPath);
+        }
+
+        [MenuItem("mvcExpress/Performance Harness/Build Mono Benchmark Player")]
+        public static void BuildMonoBenchmarkPlayer()
+        {
+            BuildBenchmarkPlayer(ScriptingImplementation.Mono2x, MonoBuildOutputPath);
+        }
+
+        [MenuItem("mvcExpress/Performance Harness/Build IL2CPP Benchmark Player")]
+        public static void BuildIl2CppBenchmarkPlayer()
+        {
+            BuildBenchmarkPlayer(ScriptingImplementation.IL2CPP, Il2CppBuildOutputPath);
+        }
+
+        private static void BuildBenchmarkPlayer(ScriptingImplementation backend, string buildOutputPath)
+        {
             EnsureBenchmarkScene();
 
-            string outputDirectory = Path.GetDirectoryName(BuildOutputPath);
+            string outputDirectory = Path.GetDirectoryName(buildOutputPath);
             if (!string.IsNullOrEmpty(outputDirectory) && !Directory.Exists(outputDirectory))
             {
                 Directory.CreateDirectory(outputDirectory);
@@ -44,7 +63,7 @@ namespace mvcExpress.Editor
             var buildPlayerOptions = new BuildPlayerOptions
             {
                 scenes = new[] { ScenePath },
-                locationPathName = BuildOutputPath,
+                locationPathName = buildOutputPath,
                 target = BuildTarget.StandaloneWindows64,
                 targetGroup = BuildTargetGroup.Standalone,
                 // Explicitly None, not Development: Tier 1 could only measure inside the Editor's
@@ -54,10 +73,21 @@ namespace mvcExpress.Editor
                 options = BuildOptions.None
             };
 
-            Debug.Log($"[PerformanceHarnessBuilder] Building release benchmark Player to '{BuildOutputPath}' " +
+            var previousBackend = PlayerSettings.GetScriptingBackend(NamedBuildTarget.Standalone);
+            PlayerSettings.SetScriptingBackend(NamedBuildTarget.Standalone, backend);
+
+            Debug.Log($"[PerformanceHarnessBuilder] Building {backend} release benchmark Player to '{buildOutputPath}' " +
                       $"(target={buildPlayerOptions.target}, options={buildPlayerOptions.options}).");
 
-            var report = BuildPipeline.BuildPlayer(buildPlayerOptions);
+            UnityEditor.Build.Reporting.BuildReport report;
+            try
+            {
+                report = BuildPipeline.BuildPlayer(buildPlayerOptions);
+            }
+            finally
+            {
+                PlayerSettings.SetScriptingBackend(NamedBuildTarget.Standalone, previousBackend);
+            }
 
             Debug.Log($"[PerformanceHarnessBuilder] Build finished: result={report.summary.result}, " +
                       $"totalErrors={report.summary.totalErrors}, totalWarnings={report.summary.totalWarnings}, " +

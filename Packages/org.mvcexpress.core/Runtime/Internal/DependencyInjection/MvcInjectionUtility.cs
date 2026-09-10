@@ -47,7 +47,17 @@ namespace mvcExpress.Internal.DependencyInjection
         /// Injects members marked with [Inject] and [InjectGlobal] attributes.
         /// AUTOMATIC TRANSIENT TRACKING: For commands, notifies processor about transient dependencies.
         /// </summary>
-        internal static void InjectMembers(object target, MvcDiContainer container, bool useViewScope, MvcCommandProcessor commandProcessor = null)
+        /// <param name="scopeOwnerOverride">
+        /// Scoped lifetime redesign: the actor that owns any Scoped dependency resolved while
+        /// injecting <paramref name="target"/>'s members. Defaults to <paramref name="target"/>
+        /// itself (the normal case - an actor's own [Inject] fields belong to that actor). Pass an
+        /// explicit override only when constructing a Scoped instance's OWN [Inject] fields on
+        /// behalf of some outer injectee - see <see cref="MvcDiContainer.TryResolveScopedForOwner"/>,
+        /// which passes the top-level owner through so a nested scoped dependency shares that
+        /// owner's scope instead of getting its own (see
+        /// InternalSpecs/Architecture/SCOPED_LIFETIME_REDESIGN.md, "Nested scoped resolution").
+        /// </param>
+        internal static void InjectMembers(object target, MvcDiContainer container, bool useViewScope, MvcCommandProcessor commandProcessor = null, object scopeOwnerOverride = null)
         {
             if (target == null || container == null)
             {
@@ -65,13 +75,14 @@ namespace mvcExpress.Internal.DependencyInjection
             // Check if this is a command (need to track transient dependencies)
             bool isCommand = commandProcessor != null && target is MvcCommandBase;
             // MvcAsyncCommandBase (not CommandAsync) is the common base for every async arity -
-            // `target is CommandAsync` alone misses CommandAsync<T1..T12> - see L2.
+            // `target is CommandAsync` alone misses CommandAsync<T1..T12>.
             bool isAsync = isCommand && target is MvcAsyncCommandBase;
+            var scopeOwner = scopeOwnerOverride ?? target;
 
             for (int i = 0; i < members.Length; i++)
             {
                 // Resolve and assign each discovered member
-                Assign(target, members[i], container, useViewScope, commandProcessor, isCommand, isAsync);
+                Assign(target, members[i], container, useViewScope, commandProcessor, isCommand, isAsync, scopeOwner);
             }
         }
 
@@ -130,11 +141,11 @@ namespace mvcExpress.Internal.DependencyInjection
         }
 
         private static void Assign(object target, InjectMember descriptor, MvcDiContainer container, bool useViewScope,
-            MvcCommandProcessor commandProcessor, bool isCommand, bool isAsync)
+            MvcCommandProcessor commandProcessor, bool isCommand, bool isAsync, object scopeOwner)
         {
             var targetContainer = descriptor.Global ? MvcFacade.Global : container;
 
-            if (!targetContainer.TryResolveInternal(descriptor.MemberType, useViewScope, out var resolved))
+            if (!targetContainer.TryResolveInternal(descriptor.MemberType, useViewScope, scopeOwner, out var resolved))
             {
                 if (descriptor.Optional)
                 {
@@ -166,11 +177,6 @@ namespace mvcExpress.Internal.DependencyInjection
                 if (targetContainer.IsTransient(descriptor.MemberType))
                 {
                     commandProcessor.OnDependencyResolved(target.GetType(), descriptor.MemberType, isAsync);
-                }
-
-                if (targetContainer.IsScoped(descriptor.MemberType))
-                {
-                    commandProcessor.OnScopedDependencyResolved();
                 }
             }
 

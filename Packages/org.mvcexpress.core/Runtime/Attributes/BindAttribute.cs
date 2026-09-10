@@ -14,9 +14,10 @@ namespace mvcExpress
     /// before code bindings in <c>BindCommands</c>.
     /// </para>
     /// <para>
-    /// A <c>TargetModuleType</c> is <b>required</b>: the shared message bus must know which
-    /// module owns the binding so it does not accidentally inject the command's dependencies
-    /// from the wrong module's DI container. For a pooled singleton-style command,
+    /// A <c>TargetModuleType</c> is <b>required</b> to identify which module owns the command
+    /// binding and therefore which module DI container supplies the command's dependencies.
+    /// It does not target message delivery: the application still has one shared bus, and every
+    /// module may bind a command to the same published message. For a pooled singleton-style command,
     /// set <see cref="PoolSize"/> to 1 (equivalent to <c>CommandSingleton</c> behaviour).
     /// </para>
     /// </remarks>

@@ -295,6 +295,9 @@ namespace mvcExpress.Internal.Commands
         public void Run<TCommand, T1, T2, T3, T4, T5, T6, T7, T8>(T1 p1, T2 p2, T3 p3, T4 p4, T5 p5, T6 p6, T7 p7, T8 p8)
             where TCommand : Command<T1, T2, T3, T4, T5, T6, T7, T8>, new()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            ValidateMainThreadForDirectExecution();
+#endif
             var pool = GetOrCreatePool<TCommand>(0);
             ExecuteCommandDirect8<TCommand, T1, T2, T3, T4, T5, T6, T7, T8>(pool, p1, p2, p3, p4, p5, p6, p7, p8);
         }
@@ -306,6 +309,9 @@ namespace mvcExpress.Internal.Commands
         public async Task RunAsync<TCommand, T1, T2, T3, T4, T5, T6, T7, T8>(T1 p1, T2 p2, T3 p3, T4 p4, T5 p5, T6 p6, T7 p7, T8 p8)
             where TCommand : CommandAsync<T1, T2, T3, T4, T5, T6, T7, T8>, new()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            ValidateMainThreadForDirectExecution();
+#endif
             var pool = GetOrCreatePool<TCommand>(0);
             await ExecuteCommandDirectAsync8<TCommand, T1, T2, T3, T4, T5, T6, T7, T8>(pool, p1, p2, p3, p4, p5, p6, p7, p8);
         }

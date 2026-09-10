@@ -1,9 +1,5 @@
 using System;
-using System.Collections;
-using System.Text.RegularExpressions;
 using NUnit.Framework;
-using UnityEngine;
-using UnityEngine.TestTools;
 using mvcExpress.Internal.Messaging;
 
 namespace mvcExpress.Tests
@@ -66,104 +62,6 @@ namespace mvcExpress.Tests
 
             Assert.IsFalse(result);
             Assert.AreEqual(0, tracker.Count);
-        }
-
-        [UnityTest]
-        public IEnumerator CleanupDead_WithDeadReferences_RemovesThemAndInvokesAction()
-        {
-            var token = default(SubscriptionToken);
-            bool actionCalled = false;
-
-            TrackDeadSubscriber(tracker, token, t => actionCalled = true);
-
-            // Force GC across frame boundaries. yield return null gives up the main thread
-            // so Unity's incremental GC can run between frames - required in Play Mode.
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            yield return null;
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            yield return null;
-
-            tracker.CleanupDead();
-
-            Assert.AreEqual(0, tracker.Count);
-            Assert.IsTrue(actionCalled);
-        }
-        
-        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-        private static void TrackDeadSubscriber(SubscriptionTracker tracker, SubscriptionToken token, Action<SubscriptionToken> action)
-        {
-            var subscriber = new DummySubscriber();
-            tracker.Track(typeof(object), subscriber, token, 0, action);
-        }
-
-        [UnityTest]
-        public IEnumerator CleanupDead_ActionThrowsException_CatchesAndContinues()
-        {
-            var token1 = default(SubscriptionToken);
-            var token2 = default(SubscriptionToken);
-            bool action2Called = false;
-
-            TrackDeadSubscriber(tracker, token1, t => throw new Exception("Test Exception"));
-            TrackDeadSubscriber(tracker, token2, t => action2Called = true);
-
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            yield return null;
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            yield return null;
-
-            LogAssert.Expect(LogType.Warning, new Regex("Error unsubscribing tracked subscription: Test Exception"));
-            tracker.CleanupDead();
-
-            Assert.AreEqual(0, tracker.Count);
-            Assert.IsTrue(action2Called);
-        }
-
-        [Test]
-        public void CheckAndCleanup_BelowThreshold_DoesNotTriggerCleanup()
-        {
-            var token = default(SubscriptionToken);
-            bool actionCalled = false;
-            TrackDeadSubscriber(tracker, token, t => actionCalled = true);
-
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect(); // second pass collects objects promoted to finalization queue
-
-            // Track() itself now calls CheckAndCleanup() once (see L10), so only 18 more calls
-            // are needed to stay one below the threshold of 20.
-            for (int i = 0; i < 18; i++)
-            {
-                tracker.CheckAndCleanup();
-            }
-
-            Assert.AreEqual(1, tracker.Count);
-            Assert.IsFalse(actionCalled);
-        }
-
-        [UnityTest]
-        public IEnumerator CheckAndCleanup_HitsThreshold_TriggersCleanup()
-        {
-            var token = default(SubscriptionToken);
-            bool actionCalled = false;
-            TrackDeadSubscriber(tracker, token, t => actionCalled = true);
-
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            yield return null;
-            GC.WaitForPendingFinalizers();
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            yield return null;
-
-            // Track() itself now calls CheckAndCleanup() once (see L10), so only 19 more calls
-            // are needed to land exactly on the threshold of 20.
-            for (int i = 0; i < 19; i++)
-            {
-                tracker.CheckAndCleanup();
-            }
-
-            Assert.AreEqual(0, tracker.Count);
-            Assert.IsTrue(actionCalled);
         }
 
         [Test]

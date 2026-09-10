@@ -7,8 +7,8 @@ namespace mvcExpress.Tests.Scenarios
 {
     /// <summary>
     /// Dual-scope actor lifecycle: a service registered to both Logic and View scope in the
-    /// same permanent registration. Guards against double OnInitialized/OnCleanup calls (M2)
-    /// and against one scope's Unregister disposing an instance the other scope still resolves (M3).
+    /// same permanent registration. Guards against double OnInitialized/OnCleanup calls
+    /// and against one scope's Unregister disposing an instance the other scope still resolves.
     /// </summary>
     [TestFixture]
     [Category("Scenario")]
@@ -65,7 +65,7 @@ namespace mvcExpress.Tests.Scenarios
 
             Assert.That(Trace.InitCount, Is.EqualTo(1),
                 "A service registered .ToLogic().ToView().AsPermanent() must have OnInitialized called " +
-                "exactly once. Before the M2 fix, EnumerateAllInstances yielded the same instance once per " +
+                "exactly once. Before this fix, EnumerateAllInstances yielded the same instance once per " +
                 "dictionary entry (logic + view), so the init loop injected and initialized it twice.");
         }
 
@@ -79,7 +79,7 @@ namespace mvcExpress.Tests.Scenarios
             _moduleGo = null;
 
             Assert.That(Trace.CleanupCount, Is.EqualTo(1),
-                "OnCleanup must fire exactly once for a dual-scope-registered service. Before the M2 fix, " +
+                "OnCleanup must fire exactly once for a dual-scope-registered service. Before this fix, " +
                 "the service was added to _lifecycleServices twice, so OnCleanup also fired twice at teardown.");
         }
     }

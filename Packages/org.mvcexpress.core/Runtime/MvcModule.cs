@@ -4,12 +4,13 @@ using mvcExpress.Internal.DependencyInjection;
 using mvcExpress.Internal.Initialization;
 using mvcExpress.Internal.Interfaces;
 using mvcExpress.Internal.Messaging;
-using mvcExpress.Internal.Proxy;
+using mvcExpress.Internal.Proxies;
 using mvcExpress.Internal.Services;
 using mvcExpress.Logging;
 using mvcExpress.Plugins;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using UnityEngine;
@@ -17,13 +18,14 @@ using UnityEngine;
 namespace mvcExpress
 {
     /// <summary>
-    /// Base class for a self-contained mvcExpress application unit. This is the composition root
-    /// for one standalone application - a complete feature area, game mode, or screen that could
-    /// work independently with its own data, logic, and views.
+    /// Base class for a self-contained feature module within one mvcExpress application. This is
+    /// the composition root for a feature area, game mode, or screen with its own data, logic,
+    /// views, dependency container, and command bindings.
     /// </summary>
     /// <remarks>
-    /// Each module owns an isolated DI container and a set of command bindings. All modules share
-    /// a single app-wide message bus owned by <see cref="MvcFacade"/>. Derive from this class
+    /// Each module owns an isolated DI container and a set of command bindings, but never owns a
+    /// message bus. As a fundamental design invariant, <see cref="MvcFacade"/> owns exactly one
+    /// application-wide bus shared by every module. Derive from this class
     /// and override the lifecycle methods in order:
     /// <list type="number">
     ///   <item><see cref="RegisterServices"/> - long-lived business-logic singletons</item>
@@ -95,6 +97,7 @@ namespace mvcExpress
 
         internal MvcMessageBus MessageBus => _messageBus;
         internal MvcDiContainer DiContainer => _diContainer;
+        internal MvcActorContext ActorContext => _actorContext;
         internal MvcCommandProcessor CommandProcessor => _commandProcessor;
         internal CancellationToken CancelToken => _lifecycleCts?.Token ?? CancellationToken.None;
 
@@ -108,8 +111,9 @@ namespace mvcExpress
         protected Transform ViewContainer => _viewContainer != null ? _viewContainer.transform : transform;
 
         /// <summary>
-        /// Publishes typed messages on the app-wide message bus. Modules react to messages by
-        /// binding commands via <see cref="Commander"/> - use <see cref="MediatorBehaviour"/> to subscribe.
+        /// Publishes typed messages on the application's single message bus. Every matching
+        /// subscriber in every module can receive them. Modules react to messages by binding
+        /// commands via <see cref="Commander"/> - use <see cref="MediatorBehaviour"/> to subscribe.
         /// </summary>
         protected MessengerApi Messenger => _messenger;
 
@@ -475,7 +479,7 @@ namespace mvcExpress
 
         // Returns 'existing' if non-null; otherwise searches children by component type, then by
         // child name, and finally creates a new child GameObject with 'defaultName' as a fallback.
-        private T EnsureContainer<T>(T existing, string defaultName) where T : MonoBehaviour
+        protected T EnsureContainer<T>(T existing, string defaultName) where T : MonoBehaviour
         {
             if (existing != null)
             {
@@ -573,13 +577,64 @@ namespace mvcExpress
         /// </remarks>
         protected virtual void Awake()
         {
-            OnModuleAwake();
-
             // Ensure facade exists (and AttributeScanner is scanned) BEFORE module initialization
             _ = MvcFacade.FacadeInstance;
 
-            InitializeModule();
-            MvcFacade.FacadeInstance.RegisterModule(this);
+            // Reserve this module's type identity BEFORE running any user-overridable code,
+            // including OnModuleAwake(). A duplicate module of an already-registered type must
+            // be rejected here, before it can run pre-init side effects, bind commands, or
+            // attach mediators onto the shared MvcFacade.MessageBus.
+            try
+            {
+                MvcFacade.FacadeInstance.RegisterModule(this);
+            }
+            catch (InvalidOperationException)
+            {
+                MvcDebug.LogError(
+                    $"[MvcModule] Duplicate module of type '{IdName}' detected before initialization; " +
+                    "destroying the duplicate instance.");
+#if UNITY_EDITOR
+                if (Application.isPlaying)
+                    Destroy(gameObject);
+                else
+                    DestroyImmediate(gameObject);
+#else
+                Destroy(gameObject);
+#endif
+                return;
+            }
+
+            // A module that throws partway through initialization is a zombie: it is already
+            // registered with the facade (reserved above) but has committed some undefined subset
+            // of its five phases' DI registrations, bus subscriptions, and spawned GameObjects.
+            // Destroying it immediately runs the normal OnDestroy() teardown pipeline, which - by
+            // design across every sub-registrar (ProxyRegistrar, MediatorRegistrar,
+            // ModuleInitializer's lifecycle-service list, MvcCommandProcessor's bindings) - tracks
+            // its own state incrementally and cleans up only what it actually tracked, so it is
+            // already correct for a partially-initialized module with no extra work.
+            // OnModuleAwake() runs inside this same guard (after identity is
+            // reserved, so a duplicate never reaches it) so a throwing pre-init hook
+            // is treated the same way as a throwing initialization phase.
+            try
+            {
+                OnModuleAwake();
+                InitializeModule();
+            }
+            catch (Exception)
+            {
+                MvcDebug.LogError(
+                    $"[MvcModule] Module '{IdName}' failed to initialize and will be destroyed. " +
+                    "See the exception below for the root cause.");
+#if UNITY_EDITOR
+                if (Application.isPlaying)
+                    Destroy(gameObject);
+                else
+                    DestroyImmediate(gameObject);
+#else
+                Destroy(gameObject);
+#endif
+                throw;
+            }
         }
 
         /// <summary>
@@ -596,41 +651,61 @@ namespace mvcExpress
             _lifecycleCts?.Dispose();
             _lifecycleCts = null;
 
-            RunExtensionDestroy();
-
-            if (_initializer != null)
+            // facade.UnregisterModule(this) lives in this finally as a safety net: it must run
+            // once teardown has started even if some phase above throws, otherwise MvcFacade keeps
+            // a stale entry for this module's type forever - a permanently zombie-registered module
+            // that can never be re-registered for the rest of the process/session (COR-16). Every
+            // phase below is already individually exception-guarded internally (MediatorRegistrar/
+            // ProxyRegistrar.Cleanup(), ModuleInitializer.CleanupServices()), so this is the outer
+            // net for whichever one isn't, now or in the future.
+            try
             {
-                _initializer.MediatorRegistrar?.Cleanup();
-                _initializer.ProxyRegistrar?.Cleanup();
-                _initializer.CleanupServices();
+                RunExtensionDestroy();
+
+                if (_initializer != null)
+                {
+                    _initializer.MediatorRegistrar?.Cleanup();
+                    _initializer.ProxyRegistrar?.Cleanup();
+                    _initializer.CleanupServices();
+                }
+
+                _manualMediators.Clear();
+
+                _commandProcessor?.Dispose();
+                _commandProcessor = null;
+                _messageBus = null; // release reference only; bus is owned by MvcFacade
+
+                // A module does not support [Inject] fields, but its Container/Global APIs can
+                // explicitly resolve scoped dependencies. Release both owner scopes before their
+                // containers are torn down.
+                _diContainer?.ReleaseScopedInstancesFor(this);
+                MvcFacade.GlobalContainerOrNull?.ReleaseScopedInstancesFor(this);
+
+                // Dispose the module's own DI container so plain IDisposable services (ones that
+                // don't implement IMvcLifecycle, so CleanupServices() above never touched them) are
+                // released, and permanent registrations don't rely on the container object itself
+                // becoming unreachable to free their instances. Disposal is idempotent on
+                // Proxy, so re-disposing proxies the registrar already cleaned up above is harmless.
+                _diContainer?.Dispose();
+                _diContainer = null;
             }
-
-            _manualMediators.Clear();
-
-            _commandProcessor?.Dispose();
-            _commandProcessor = null;
-            _messageBus = null; // release reference only; bus is owned by MvcFacade
-
-            // Dispose the module's own DI container so plain IDisposable services (ones that
-            // don't implement IMvcLifecycle, so CleanupServices() above never touched them) are
-            // released, and permanent registrations don't rely on the container object itself
-            // becoming unreachable to free their instances - see M9. Disposal is idempotent on
-            // Proxy, so re-disposing proxies the registrar already cleaned up above is harmless.
-            _diContainer?.Dispose();
-            _diContainer = null;
-
-            var facade = MvcFacade.InstanceOrNull;
-            if (facade != null)
+            finally
             {
-                facade.UnregisterModule(this);
+                var facade = MvcFacade.InstanceOrNull;
+                if (facade != null)
+                {
+                    facade.UnregisterModule(this);
+                }
             }
 
             OnModuleDestroy();
         }
 
         /// <summary>
-        /// Called at the very beginning of <see cref="Awake"/>, before the framework runs its
-        /// initialization sequence. Use for any module-specific pre-init setup.
+        /// Called from <see cref="Awake"/> after this module's identity is reserved with
+        /// <see cref="MvcFacade"/> (so a duplicate module never reaches this hook), but before the
+        /// framework runs its phased initialization sequence. Use for any module-specific pre-init
+        /// setup.
         /// </summary>
         protected virtual void OnModuleAwake() { }
 
@@ -710,6 +785,12 @@ namespace mvcExpress
                 _initializer?.ProxyRegistrar?.TrackCodeProxy(proxy);
             }
         }
+
+        // Tracks a plain IMvcLifecycle service registered dynamically after normal initialization
+        // (e.g. from a Command via CommandContainerApi.Register), so it also gets OnCleanup()
+        // called at module teardown - see CommandContainerApi's InitializeDynamicRegistration.
+        internal void TrackDynamicLifecycleService(IMvcLifecycle service) =>
+            _initializer?.TrackDynamicLifecycleService(service);
 
         /// <summary>
         /// Removes every mediator that was attached at runtime (after the
@@ -881,19 +962,21 @@ namespace mvcExpress
                 }
             }
 
-            // Check attribute registry (from ModuleInitializer's tracking lists)
+            // Check attribute registry (from ModuleInitializer's tracking lists). Reference-identity
+            // comparer, not List<T>.Contains's default value equality: a value-equal
+            // instance would otherwise be misreported as Attribute-sourced here.
             if (_initializer != null)
             {
                 if (isService)
                 {
                     var attributeServices = _initializer.GetAttributeServices();
-                    if (attributeServices != null && attributeServices.Contains(instance))
+                    if (attributeServices != null && attributeServices.Contains(instance, MvcDiContainer.ReferenceIdentityComparer.Instance))
                         return RegistrationSource.Attribute;
                 }
                 else
                 {
                     var attributeProxies = _initializer.GetAttributeProxies();
-                    if (attributeProxies != null && attributeProxies.Contains(instance))
+                    if (attributeProxies != null && attributeProxies.Contains(instance, MvcDiContainer.ReferenceIdentityComparer.Instance))
                         return RegistrationSource.Attribute;
                 }
             }

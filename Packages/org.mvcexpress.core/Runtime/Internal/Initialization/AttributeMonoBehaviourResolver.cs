@@ -15,7 +15,14 @@ namespace mvcExpress.Internal.Initialization
         Created,
 
         /// <summary>More than one instance of the type exists in the searched hierarchy.</summary>
-        Ambiguous
+        Ambiguous,
+
+        /// <summary>
+        /// No existing instance was found and <c>createIfMissing</c> was false, so none was created.
+        /// A caller whose strategy requires a pre-existing hand-placed
+        /// instance (e.g. <c>[Attach(FindInScene = true)]</c>) uses this instead of Created.
+        /// </summary>
+        NotFound
     }
 
     /// <summary>
@@ -42,6 +49,9 @@ namespace mvcExpress.Internal.Initialization
 
         public static MonoBehaviourResolution Ambiguous(GameObject[] conflicts) =>
             new MonoBehaviourResolution(MonoBehaviourResolutionKind.Ambiguous, null, conflicts);
+
+        public static MonoBehaviourResolution NotFound() =>
+            new MonoBehaviourResolution(MonoBehaviourResolutionKind.NotFound, null, null);
     }
 
     /// <summary>
@@ -69,11 +79,20 @@ namespace mvcExpress.Internal.Initialization
         /// An instance already known via Inspector-driven mapping (<c>ProxyMapping</c>/<c>ServiceMapping</c>), if any.
         /// When non-null, this short-circuits the hierarchy scan entirely - an explicitly wired instance always wins.
         /// </param>
+        /// <param name="createIfMissing">
+        /// When true (default), no match creates a new instance under <paramref name="parentContainer"/>
+        /// (the existing Proxy/Service attribute behavior). When false, no match returns
+        /// <see cref="MonoBehaviourResolutionKind.NotFound"/> instead - for a caller whose strategy
+        /// requires a pre-existing hand-placed instance, e.g. <c>[Attach(FindInScene = true)]</c>
+        /// mediators, where auto-creating one would be the wrong behavior.
+        /// <paramref name="parentContainer"/> is never read when this is false.
+        /// </param>
         internal static MonoBehaviourResolution Resolve(
             Transform searchRoot,
             Type behaviourType,
             Transform parentContainer,
-            MonoBehaviour preTracked)
+            MonoBehaviour preTracked,
+            bool createIfMissing = true)
         {
             if (preTracked != null)
                 return MonoBehaviourResolution.Found(preTracked);
@@ -91,6 +110,9 @@ namespace mvcExpress.Internal.Initialization
 
                 return MonoBehaviourResolution.Ambiguous(conflicts);
             }
+
+            if (!createIfMissing)
+                return MonoBehaviourResolution.NotFound();
 
             var go = new GameObject(behaviourType.Name);
             go.transform.SetParent(parentContainer, false);

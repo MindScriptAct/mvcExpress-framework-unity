@@ -4,11 +4,15 @@ Lightweight MVC framework for Unity (2021.3+) with modular architecture, depende
 
 Full documentation and guides: **[mvcexpress.org](https://www.mvcexpress.org/)**
 
+## Messaging invariant
+
+One application has exactly one `MessageBus`. This is a fundamental mvcExpress design choice, not a configurable scope: `MvcFacade` owns the bus and every module and actor uses it. Every publish is application-wide. mvcExpress does not provide module-local buses, target-module buses, message bridges, or per-module delivery filters.
+
 ## Features
 
 - **Modular architecture** - each `MvcModule` is an isolated composition root
 - **Dependency injection** - constructor and `[Inject]` property injection; no reflection in hot paths
-- **Typed message bus** - zero-allocation struct messages shared across all modules
+- **Typed message bus** - zero-allocation struct messages on the single application-wide bus shared by every module
 - **Three registration styles** - Unity Inspector drag-drop, `[Register]`/`[Bind]`/`[Attach]` attributes, or code
 - **Sync and async commands** - `Command` and `CommandAsync`, both bindable to typed messages
 - **Dynamic mediators** - attach and detach `MediatorBehaviour` instances at runtime

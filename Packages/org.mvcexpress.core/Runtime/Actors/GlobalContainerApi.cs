@@ -13,17 +13,17 @@ namespace mvcExpress
     /// </remarks>
     public readonly struct GlobalContainerApi
     {
-        // Fixed at construction by the owning actor (true for mediators, false for
-        // proxies) rather than read from the ambient view-scope flag on MvcDiContainer:
-        // that flag only reflects the correct scope while a mediator's OnInitialized()
-        // call is on the stack, so a call made later (OnEnable, Update, a coroutine)
-        // would otherwise silently resolve against the wrong partition.
-        private readonly bool _useViewScope;
+        // Retaining the actor context provides both its fixed Logic/View domain and the owner
+        // identity required by per-injectee scoped resolution. The ambient container flag is
+        // only reliable while initialization is on the stack.
+        private readonly MvcActorContext _context;
 
-        internal GlobalContainerApi(bool useViewScope)
+        internal GlobalContainerApi(MvcActorContext context)
         {
-            _useViewScope = useViewScope;
+            _context = context;
         }
+
+        private bool UseViewScope => _context.Category == Logging.MvcLogContext.LogCategory.Mediator;
 
         /// <summary>
         /// Resolves a dependency from the global container.
@@ -34,7 +34,7 @@ namespace mvcExpress
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T Resolve<T>()
         {
-            return MvcFacade.Global.ResolveWithScope<T>(_useViewScope);
+            return MvcFacade.Global.ResolveWithScope<T>(UseViewScope, _context.Actor);
         }
 
         /// <summary>
@@ -46,7 +46,7 @@ namespace mvcExpress
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryResolve<T>(out T value)
         {
-            return MvcFacade.Global.TryResolveWithScope<T>(_useViewScope, out value);
+            return MvcFacade.Global.TryResolveWithScope<T>(UseViewScope, out value, _context.Actor);
         }
     }
 }

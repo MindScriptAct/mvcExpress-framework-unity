@@ -12,7 +12,7 @@ namespace mvcExpress.Tests.Scenarios
     /// <summary>
     /// Simulates a game returning to the main menu repeatedly: create a module with a bound
     /// pooled command, drive one MVC loop, destroy it, repeat. Guards against static-storage
-    /// leaks across module churn (implementation audit H1, H4).
+    /// leaks across module churn.
     /// </summary>
     [TestFixture]
     [Category("Scenario")]
@@ -89,9 +89,9 @@ namespace mvcExpress.Tests.Scenarios
 
             var poolsLengthAfterChurn = ((Array)poolsField.GetValue(null)).Length;
             Assert.That(poolsLengthAfterChurn, Is.EqualTo(poolsLengthAfterFirstCycle),
-                "CommandPool<ChurnCommand>.Pools must not keep growing across module churn. Before the " +
-                "H1 fix, processor instance IDs were never recycled, so every create/destroy cycle " +
-                "permanently leaked one static array slot (and the pooled command instance in it).");
+                "CommandPool<ChurnCommand>.Pools must not keep growing across module churn. If " +
+                "processor instance IDs were never recycled, every create/destroy cycle would " +
+                "permanently leak one static array slot (and the pooled command instance in it).");
         }
 
         [Test]
@@ -112,8 +112,8 @@ namespace mvcExpress.Tests.Scenarios
             Assert.That(lastCommandRef, Is.Not.Null, "Precondition: a pooled command reference must have been captured.");
             Assert.That(lastCommandRef.IsAlive, Is.False,
                 "A pooled command from the final iteration's module must become collectable after that " +
-                "module's processor is disposed. Before the H1 fix, Dispose() never called pool.Clear() " +
-                "and never nulled the static slot, so the pooled command (and everything it held: module " +
+                "module's processor is disposed. If Dispose() never called pool.Clear() " +
+                "and never nulled the static slot, the pooled command (and everything it held: module " +
                 "context, DI container, injected references) stayed reachable through static storage " +
                 "for the lifetime of the process.");
         }
@@ -141,7 +141,7 @@ namespace mvcExpress.Tests.Scenarios
             // discards every instance immediately instead of pushing it onto the pool's retained
             // stack. That would make CommandPool<TCommand>.Pools hold no live reference at all, so
             // this test would pass regardless of whether Dispose() correctly clears the pool - it
-            // wouldn't be testing the H1 fix. With poolSize: 1, the executed instance is actually
+            // wouldn't be testing that fix. With poolSize: 1, the executed instance is actually
             // retained by the pool's internal stack (and by the static Pools[] slot), matching how a
             // real pooled command would be held in a running game.
             processor.BindCommand<ChurnCommand, ChurnMessage>(poolSize: 1);
@@ -153,7 +153,7 @@ namespace mvcExpress.Tests.Scenarios
                 // Capture a WeakReference to the exact instance Publish just executed and returned
                 // to the pool - not a second, freshly-minted instance obtained via a separate
                 // Get()/Return() round-trip afterward (which would never be reachable through the
-                // processor's static storage and so could never expose the H1 bug).
+                // processor's static storage and so could never expose that bug).
                 weakRef = new WeakReference(ChurnCommand.LastExecuted);
             }
 

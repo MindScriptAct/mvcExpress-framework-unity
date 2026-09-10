@@ -50,7 +50,7 @@ namespace mvcExpress
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryResolve<T>(out T value)
         {
-            return _context.DiContainer.TryResolveWithScope<T>(UseViewScope, out value);
+            return _context.DiContainer.TryResolveWithScope<T>(UseViewScope, out value, _context.Actor);
         }
     }
 }

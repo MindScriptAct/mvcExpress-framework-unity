@@ -91,6 +91,12 @@ namespace mvcExpress.Tests.Scenarios
 
             var facade = MvcFacade.InstanceOrNull;
             if (facade != null) Object.DestroyImmediate(facade.gameObject);
+
+            // Defense in depth for the per-frame budget knobs: a test that fails before
+            // reaching its own try/finally reset must not leak a non-default budget into whatever
+            // test runs next in the suite.
+            MvcFacade.MaxDeferredPublishesPerFrame = int.MaxValue;
+            MvcFacade.MaxDeferredPublishMillisecondsPerFrame = double.MaxValue;
         }
 
         [UnityTest]
@@ -153,6 +159,135 @@ namespace mvcExpress.Tests.Scenarios
             Assert.That(DeferredMediator.ReceivedValue, Is.EqualTo(-1),
                 "No subscriber should ever observe a deferred publish enqueued with no facade present " +
                 "to drain it.");
+        }
+
+        /// <summary>
+        /// A burst bigger than the configured per-frame budget must not lose entries - it must drain up to
+        /// the budget this frame and carry the remainder over to the next, never drop it.
+        /// </summary>
+        [UnityTest]
+        public IEnumerator PublishDeferred_BurstExceedsPerFrameBudget_DrainsBudgetThenCarriesOverRemainder()
+        {
+            _moduleGo = new GameObject(nameof(DeferredModule));
+            var module = _moduleGo.AddComponent<DeferredModule>();
+
+            MvcFacade.MaxDeferredPublishesPerFrame = 1;
+
+            module.PublishDeferredNow(1);
+            module.PublishDeferredNow(2);
+
+            Assert.That(MvcFacade.PendingDeferredPublishCount, Is.EqualTo(2),
+                "Both enqueued actions should be pending before any Update() drain has run.");
+
+            yield return null; // one Update() drain, budgeted to 1 action
+
+            Assert.That(DeferredMediator.ReceivedValue, Is.EqualTo(1),
+                "Only the first queued action should run within the budgeted frame.");
+            Assert.That(MvcFacade.PendingDeferredPublishCount, Is.EqualTo(1),
+                "The second action must carry over to the next frame rather than being dropped.");
+            Assert.That(MvcFacade.PeakDeferredPublishCount, Is.EqualTo(2),
+                "High-water mark is sampled at frame start (before the budgeted drain runs), so it " +
+                "must reflect the full backlog of 2 that was pending when the frame began - not the " +
+                "1 left over afterward.");
+
+            yield return null; // second Update() drain picks up the carried-over remainder
+
+            Assert.That(DeferredMediator.ReceivedValue, Is.EqualTo(2),
+                "The carried-over action must still run, on a later frame, not be dropped.");
+            Assert.That(MvcFacade.PendingDeferredPublishCount, Is.EqualTo(0));
+        }
+
+        /// <summary>
+        /// Closes the race where an action is enqueued but the facade is destroyed before
+        /// any <c>Update()</c> gets a chance to drain it. Before the fix, <c>OnDestroy</c> did not
+        /// drain the queue at all, so this action would be silently stranded forever even though
+        /// <c>PublishDeferredNow</c> reported success. Uses <c>DestroyImmediate</c> (synchronous
+        /// <c>OnDestroy</c>) specifically so no <c>Update()</c> can run in between.
+        /// </summary>
+        [Test]
+        public void PublishDeferred_ThenFacadeDestroyedBeforeAnyUpdate_StillDeliversViaFinalDrain()
+        {
+            _moduleGo = new GameObject(nameof(DeferredModule));
+            var module = _moduleGo.AddComponent<DeferredModule>();
+
+            module.PublishDeferredNow(9);
+            Assert.That(MvcFacade.PendingDeferredPublishCount, Is.EqualTo(1),
+                "Precondition: the action must be queued and not yet drained by any Update().");
+
+            var facade = MvcFacade.InstanceOrNull;
+            Assert.That(facade, Is.Not.Null);
+            Object.DestroyImmediate(facade.gameObject); // synchronous OnDestroy - no Update() runs first
+
+            Assert.That(DeferredMediator.ReceivedValue, Is.EqualTo(9),
+                "OnDestroy's final drain must still deliver an action queued before any Update() ran, " +
+                "not silently strand it.");
+        }
+
+        /// <summary>
+        /// PERF-03 follow-up: under the default unlimited per-frame budget, the drain loop always
+        /// empties the queue down to the frame-start target, so a peak sampled only AFTER draining
+        /// would read ~0 no matter how large the burst was - the high-water mark would never be able
+        /// to do its job of surfacing a burst under the most common (default) configuration. This
+        /// would have failed before the fix (old behavior: peak stayed 0).
+        /// </summary>
+        [UnityTest]
+        public IEnumerator PublishDeferred_LargeBurstFullyDrainsUnderDefaultBudget_PeakReflectsFrameStartBacklog()
+        {
+            _moduleGo = new GameObject(nameof(DeferredModule));
+            var module = _moduleGo.AddComponent<DeferredModule>();
+
+            const int burstSize = 50;
+            for (int i = 0; i < burstSize; i++)
+            {
+                module.PublishDeferredNow(i);
+            }
+
+            Assert.That(MvcFacade.PendingDeferredPublishCount, Is.EqualTo(burstSize),
+                "Precondition: the whole burst must be queued before any Update() drain runs.");
+
+            yield return null; // default (unlimited) budget drains the entire burst in one Update()
+
+            Assert.That(MvcFacade.PendingDeferredPublishCount, Is.EqualTo(0),
+                "Precondition: the unlimited default budget must fully drain the burst within this one frame.");
+            Assert.That(MvcFacade.PeakDeferredPublishCount, Is.EqualTo(burstSize),
+                "Peak must reflect the backlog size observed at frame start, not the near-zero amount " +
+                "left over once an unlimited-budget drain empties the queue.");
+        }
+
+        /// <summary>
+        /// PERF-03 follow-up: a second MvcFacade component's Awake() used to reset the static
+        /// PeakDeferredPublishCount to 0 before the duplicate-instance check even ran, silently
+        /// wiping the real singleton's telemetry. This would have failed before the fix (old
+        /// behavior: peak dropped back to 0 after the duplicate's Awake ran).
+        /// </summary>
+        [UnityTest]
+        public IEnumerator SecondFacadeAddedAsDuplicate_DoesNotResetSingletonsPeak()
+        {
+            _moduleGo = new GameObject(nameof(DeferredModule));
+            var module = _moduleGo.AddComponent<DeferredModule>();
+
+            module.PublishDeferredNow(1);
+            module.PublishDeferredNow(2);
+            yield return null; // drains both; frame-start peak becomes 2
+
+            Assert.That(MvcFacade.PeakDeferredPublishCount, Is.EqualTo(2),
+                "Precondition: peak recorded from the first burst.");
+
+            var duplicateGo = new GameObject("DuplicateFacade");
+            try
+            {
+                // Awake() logs a warning when it detects and destroys itself as a duplicate -
+                // expected here, not a failure.
+                LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("Duplicate MvcFacade instance detected"));
+                duplicateGo.AddComponent<MvcFacade>(); // triggers Awake() synchronously; self-destroys as a duplicate
+
+                Assert.That(MvcFacade.PeakDeferredPublishCount, Is.EqualTo(2),
+                    "A duplicate MvcFacade instance's Awake() must not reset the accepted singleton's peak telemetry.");
+            }
+            finally
+            {
+                Object.DestroyImmediate(duplicateGo);
+            }
         }
     }
 }

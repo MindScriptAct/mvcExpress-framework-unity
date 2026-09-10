@@ -1,10 +1,11 @@
-﻿<Solution>
+<Solution>
   <Project Path="org.mvcexpress.core.csproj" />
+  <Project Path="org.mvcexpress.core.Tests.Scenarios.csproj" />
   <Project Path="org.mvcexpress.core.Editor.csproj" />
   <Project Path="org.mvcexpress.core.Tests.csproj" />
-  <Project Path="org.mvcexpress.core.Tests.Scenarios.csproj" />
   <Project Path="org.mvcexpress.core.Editor.Tests.csproj" />
   <Project Path="mvcExpress.PerformanceHarness.csproj" />
   <Project Path="mvcExpress.PerformanceHarness.Editor.csproj" />
   <Project Path="org.mvcexpress.core.Tests.Performance.csproj" />
+  <Project Path="Tools/PerformanceDashboard/PerformanceDashboard.csproj" />
 </Solution>

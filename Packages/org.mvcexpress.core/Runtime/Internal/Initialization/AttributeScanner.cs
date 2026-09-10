@@ -88,14 +88,15 @@ namespace mvcExpress.Internal.Initialization
                 try
                 {
                     PerformAssemblyScan();
+                    _isScanned = true;
                 }
                 catch (Exception ex)
                 {
+                    // Leave _isScanned false so a failed scan cannot masquerade as a complete one:
+                    // Get*Metadata callers will throw via EnsureScanned() instead of silently
+                    // reading whatever partial data PerformAssemblyScan managed to collect before
+                    // it failed, and a later ScanAssemblies() call will retry from scratch.
                     MvcDebug.LogError($"Attribute scan failed: {ex.Message}");
-                }
-                finally
-                {
-                    _isScanned = true;
                 }
             }
         }
@@ -318,6 +319,48 @@ namespace mvcExpress.Internal.Initialization
                 }
             }
 
+            // Populated in whatever order AppDomain.CurrentDomain.GetAssemblies()/Assembly.GetTypes()
+            // happened to enumerate this run, which .NET does not guarantee to be stable across
+            // domain reloads, editor restarts, or machines. Re-sort every cache now, once, so that
+            // callers (ModuleInitializer et al.) always see the same order regardless of scan-time
+            // enumeration order.
+            SortCachesForDeterministicOrder();
+        }
+
+        // Stable-sorts every cache by (assembly name, type full name) so that iteration order is
+        // reproducible across runs instead of depending on assembly/type enumeration order.
+        // LINQ OrderBy/ThenBy is a stable sort, so entries that tie on both keys (e.g. two attributes
+        // of the same kind declared on the very same type) keep their original relative order - i.e.
+        // the order they were enumerated/declared in - without needing a separate declaration-index
+        // field. This intentionally does NOT introduce a public "Order" concept: that would be a
+        // bigger API surface decision (new attribute property, precedence rules against this
+        // alphabetical key, defaults) left for a future, deliberate change.
+        private static void SortCachesForDeterministicOrder()
+        {
+            SortCacheValues(_proxyCache, m => m.ProxyType);
+            SortCacheValues(_serviceCache, m => m.ServiceType);
+            SortCacheValues(_commandCache, m => m.CommandType);
+            SortCacheValues(_mediatorCache, m => m.MediatorType);
+
+            _globalCache = SortByAssemblyThenFullName(_globalCache, m => m.ConcreteType);
+            _startupModuleCache = SortByAssemblyThenFullName(_startupModuleCache, m => m.ModuleType);
+        }
+
+        private static void SortCacheValues<TMetadata>(Dictionary<Type, List<TMetadata>> cache, Func<TMetadata, Type> typeSelector)
+        {
+            // ToList() the key set first - can't mutate a Dictionary's values while enumerating it.
+            foreach (var key in cache.Keys.ToList())
+            {
+                cache[key] = SortByAssemblyThenFullName(cache[key], typeSelector);
+            }
+        }
+
+        private static List<TMetadata> SortByAssemblyThenFullName<TMetadata>(List<TMetadata> list, Func<TMetadata, Type> typeSelector)
+        {
+            return list
+                .OrderBy(m => typeSelector(m).Assembly.GetName().Name, StringComparer.Ordinal)
+                .ThenBy(m => typeSelector(m).FullName, StringComparer.Ordinal)
+                .ToList();
         }
 
         /// <summary>

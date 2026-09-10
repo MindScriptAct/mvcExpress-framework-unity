@@ -1,7 +1,9 @@
 using System;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 using Object = UnityEngine.Object;
 using mvcExpress;
 
@@ -26,6 +28,13 @@ namespace mvcExpress.Tests
 
         // Mediator stub used as a key type in TryGetMediatorPrefab tests.
         private class StubMediator : MediatorBehaviour { }
+
+        // Throws from OnCleanup() - used to prove a throwing runtime mediator cannot leave the
+        // owning module zombie-registered with MvcFacade (COR-16).
+        private class ThrowingOnCleanupMediator : MediatorBehaviour
+        {
+            protected override void OnCleanup() => throw new InvalidOperationException("Boom.");
+        }
 
         // ── Fields ────────────────────────────────────────────────────────────
 
@@ -305,6 +314,52 @@ namespace mvcExpress.Tests
 
             Assert.IsFalse(facade.IsModuleRegistered(typeof(TestModule)),
                 "OnDestroy must unregister the module from MvcFacade.");
+        }
+
+        [Test]
+        public void ModuleTeardown_OnDestroy_MediatorOnCleanupThrows_ModuleStillUnregisteredFromFacade()
+        {
+            // COR-16 regression: a throwing runtime mediator's OnCleanup() used to abort
+            // MediatorRegistrar.Cleanup()'s loop, which aborted MvcModule.OnDestroy() itself before
+            // it ever reached facade.UnregisterModule(this) - permanently zombie-registering the
+            // module (MvcFacade._modules keeps a stale entry, blocking any future re-registration
+            // of that module type for the rest of the process/session).
+            _moduleGo = new GameObject("TestModule");
+            var module = _moduleGo.AddComponent<TestModule>();
+
+            var mediatorGo = new GameObject(nameof(ThrowingOnCleanupMediator));
+            var mediator = mediatorGo.AddComponent<ThrowingOnCleanupMediator>();
+            try
+            {
+                Assert.IsTrue(module.AttachMediator(mediator),
+                    "Precondition: the throwing mediator must attach successfully as a runtime mediator.");
+
+                Assert.IsTrue(MvcFacade.InstanceOrNull.IsModuleRegistered(typeof(TestModule)),
+                    "Module must be registered before destruction (precondition).");
+
+                LogAssert.Expect(LogType.Error, new Regex(nameof(ThrowingOnCleanupMediator)));
+                LogAssert.Expect(LogType.Exception, new Regex("Boom"));
+
+                // Act: destroy the module GO - triggers OnDestroy -> MediatorRegistrar.Cleanup() ->
+                // the throwing mediator's CleanupMediator(), then (still) UnregisterModule.
+                Object.DestroyImmediate(_moduleGo);
+                _moduleGo = null; // prevent TearDown from double-destroying
+
+                var facade = MvcFacade.InstanceOrNull;
+                if (facade == null)
+                {
+                    Assert.Pass("MvcFacade was destroyed after the last module unregistered, confirming cleanup.");
+                    return;
+                }
+
+                Assert.IsFalse(facade.IsModuleRegistered(typeof(TestModule)),
+                    "The module must still be unregistered from MvcFacade even though one of its " +
+                    "mediators threw from OnCleanup() during teardown.");
+            }
+            finally
+            {
+                if (mediatorGo != null) Object.DestroyImmediate(mediatorGo);
+            }
         }
 
         [Test]

@@ -1,5 +1,6 @@
 using mvcExpress;
 using mvcExpress.Internal.DependencyInjection;
+using mvcExpress.Plugins;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -27,21 +28,29 @@ namespace mvcExpress.Editor.InternalDebug
         private static MethodInfo AddHandlerMethod   => _serviceRegisteredEvent?.GetAddMethod(true);
         private static MethodInfo RemoveHandlerMethod => _serviceRegisteredEvent?.GetRemoveMethod(true);
 
+        // See the matching remark in ProxyHierarchyVisualizer.cs - a module registering after the
+        // play-mode-entry snapshot used to be caught only by a once-a-second full-scene
+        // EditorApplication.update poll. IModuleObserver.OnModuleRegistered already fires exactly
+        // when that happens; hooking it directly removes the need for the poll.
+        private sealed class ModuleRegistrationObserver : IModuleObserver
+        {
+            public void OnModuleRegistered(Type moduleType)
+            {
+                var module = MvcFacade.InstanceOrNull?.GetModule(moduleType);
+                if (module != null) HookModule(module);
+            }
+
+            public void OnModuleInitialized(Type moduleType) { }
+            public void OnModuleUnregistered(Type moduleType) { }
+        }
+
+        private static readonly ModuleRegistrationObserver _moduleObserver = new ModuleRegistrationObserver();
+
         static ServiceHierarchyVisualizer()
         {
             EditorApplication.playModeStateChanged += OnPlayModeChanged;
             EditorApplication.delayCall += () => { if (Application.isPlaying) HookAllModules(); };
-            EditorApplication.update    += OnEditorUpdate;
-        }
-
-        private static double _nextUpdate;
-
-        private static void OnEditorUpdate()
-        {
-            if (!Application.isPlaying) return;
-            if (EditorApplication.timeSinceStartup < _nextUpdate) return;
-            _nextUpdate = EditorApplication.timeSinceStartup + 1.0;
-            HookAllModules();
+            MvcPluginBus.Register(_moduleObserver);
         }
 
         private static void OnPlayModeChanged(PlayModeStateChange state)
@@ -77,6 +86,12 @@ namespace mvcExpress.Editor.InternalDebug
 
         private static void HookModule(MvcModule module)
         {
+            if (module == null) return;
+            // Previously only ever reached through HookAllModules' own AddHandlerMethod == null
+            // guard; now also called directly from ModuleRegistrationObserver, so this needs its
+            // own guard rather than relying on a caller to have checked first.
+            if (AddHandlerMethod == null) return;
+
             var container = GetContainer(module);
             if (container == null) return;
 

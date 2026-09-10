@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Reflection;
 using NUnit.Framework;
 using UnityEngine;
@@ -39,6 +40,23 @@ namespace mvcExpress.Tests
                 RegisteredService = new TrackingService();
                 Container.Register<TrackingService>(RegisteredService).ToLogic().AsPermanent();
             }
+        }
+
+        // Module whose Services phase succeeds (registering a TrackingService) but whose LATER
+        // Proxies phase throws - tests whether the earlier, already-committed
+        // phase's state gets cleaned up even though the module never reaches Initialized.
+        private class ServiceThenFailingProxyModule : MvcModule
+        {
+            public TrackingService RegisteredService { get; private set; }
+
+            protected override void RegisterServices()
+            {
+                RegisteredService = new TrackingService();
+                Container.Register<TrackingService>(RegisteredService).ToLogic().AsPermanent();
+            }
+
+            protected override void RegisterProxies() =>
+                throw new InvalidOperationException("Deliberate test failure in RegisterProxies.");
         }
 
         // Plain service that tracks whether OnInitialized was called by the framework.
@@ -253,8 +271,8 @@ namespace mvcExpress.Tests
 
         // Section 4: Error Handling
 
-        [Test]
-        public void ErrorHandlingAndDeferredLogging_AbortsOnFailure()
+        [UnityTest]
+        public IEnumerator ErrorHandlingAndDeferredLogging_AbortsOnFailure()
         {
             // FailingOnInitializedModule.OnInitialized() throws intentionally.
             // ModuleInitializer catches this, sets IsFailed = true, stores the exception,
@@ -262,7 +280,13 @@ namespace mvcExpress.Tests
             //
             // Because the exception propagates out of AddComponent (Awake), Unity logs it as
             // an unhandled exception. We suppress that expected log with LogAssert.Expect.
-
+            //
+            // MvcModule.Awake() also catches this, logs its own error, and destroys
+            // the module - LogAssert.Expect enforces chronological order, so that error (logged
+            // synchronously, before self-destroy) must be declared before the exception it causes
+            // Unity to log once the rethrow reaches the engine.
+            LogAssert.Expect(LogType.Error,
+                new System.Text.RegularExpressions.Regex("failed to initialize and will be destroyed"));
             LogAssert.Expect(LogType.Exception,
                 new System.Text.RegularExpressions.Regex("Deliberate test failure"));
 
@@ -283,12 +307,14 @@ namespace mvcExpress.Tests
 
             try
             {
-                // Even if AddComponent did not throw, the module was created and Awake ran.
-                // module may be null only if Unity destroyed the GO on exception, which it does not.
+                // Even if AddComponent did not throw, the module was created and Awake ran, so the
+                // component (and its plain C# _initializer field) are still inspectable here -
+                // Destroy(gameObject) is deferred to end-of-frame in Play Mode, so the reflection
+                // checks below run before the module is actually gone (see the yield further down).
                 if (module == null && go != null)
                     module = go.GetComponent<FailingOnInitializedModule>();
 
-                Assert.IsNotNull(module, "Module GameObject must exist even after Awake throws.");
+                Assert.IsNotNull(module, "Module component must still be inspectable synchronously, before the deferred Destroy() takes effect.");
 
                 var initializer = GetInitializer(module);
                 Assert.IsNotNull(initializer,
@@ -314,6 +340,68 @@ namespace mvcExpress.Tests
                 Assert.Throws<InvalidOperationException>(
                     () => initializer.Initialize(),
                     "Calling Initialize() on a Failed module must throw InvalidOperationException.");
+
+                // The module must have been destroyed as a consequence of the failure -
+                // yield once so Destroy(gameObject) (deferred to end-of-frame in Play Mode) takes
+                // effect before checking Unity's overloaded null comparison.
+                yield return null;
+
+                Assert.IsTrue(go == null,
+                    "A module whose initialization fails must be destroyed.");
+            }
+            finally
+            {
+                DestroyModuleAndFacade(go);
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator EarlierPhaseState_IsCleanedUp_WhenALaterPhaseFails()
+        {
+            // A module whose Services phase already committed real state
+            // (here, a plain service registered and OnInitialized-called) must not leave that state
+            // dangling forever just because a LATER phase (Proxies) then fails. Self-destroying the
+            // module (see ErrorHandlingAndDeferredLogging_AbortsOnFailure above) routes through the
+            // normal OnDestroy() pipeline, which calls OnCleanup() on every tracked lifecycle
+            // service regardless of how far initialization got - this test proves that concretely.
+            LogAssert.Expect(LogType.Error,
+                new System.Text.RegularExpressions.Regex("failed to initialize and will be destroyed"));
+            LogAssert.Expect(LogType.Exception,
+                new System.Text.RegularExpressions.Regex("Deliberate test failure in RegisterProxies"));
+
+            GameObject go = null;
+            ServiceThenFailingProxyModule module = null;
+            try
+            {
+                go = new GameObject(nameof(ServiceThenFailingProxyModule));
+                module = go.AddComponent<ServiceThenFailingProxyModule>();
+            }
+            catch (Exception)
+            {
+                // AddComponent may or may not surface the exception depending on Unity version.
+            }
+
+            try
+            {
+                if (module == null && go != null)
+                    module = go.GetComponent<ServiceThenFailingProxyModule>();
+
+                var service = module.RegisteredService;
+                Assert.IsNotNull(service,
+                    "Precondition: the Services phase must have committed before Proxies threw.");
+                Assert.IsTrue(service.OnInitializedCalled,
+                    "Precondition: the earlier phase's service must have been fully initialized.");
+                Assert.IsFalse(service.OnCleanupCalled,
+                    "Precondition: OnCleanup() must not have run yet - the module hasn't been destroyed.");
+
+                yield return null;
+
+                Assert.IsTrue(go == null,
+                    "The module must have been destroyed after the Proxies phase failed.");
+                Assert.IsTrue(service.OnCleanupCalled,
+                    "The earlier, already-committed Services-phase state must still be cleaned up " +
+                    "(OnCleanup() called) via the normal OnDestroy() pipeline, even though the module " +
+                    "never reached Initialized.");
             }
             finally
             {

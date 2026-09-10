@@ -17,6 +17,13 @@ namespace mvcExpress
     /// </remarks>
     public readonly struct CommandGlobalContainerApi
     {
+        private readonly MvcActorContext _context;
+
+        internal CommandGlobalContainerApi(MvcActorContext context)
+        {
+            _context = context;
+        }
+
         /// <summary>
         /// Begins registering an instance in the global container.
         /// </summary>
@@ -35,7 +42,12 @@ namespace mvcExpress
                 throw new ArgumentNullException(nameof(instance));
             }
 
-            return MvcFacade.Global.Register(instance);
+            var builder = MvcFacade.Global.Register(instance);
+            // Deferred until the builder chain commits as non-scoped - see
+            // RegistrationBuilder<T>.OnNonScopedCommitted. A .AsScoped() chain must never
+            // initialize this throwaway seed instance.
+            builder.OnNonScopedCommitted = InitializeRegisteredInstance;
+            return builder;
         }
 
         /// <summary>
@@ -60,7 +72,10 @@ namespace mvcExpress
                 throw new ArgumentNullException(nameof(type));
             }
 
-            return MvcFacade.Global.Register(instance, type);
+            var builder = MvcFacade.Global.Register(instance, type);
+            // See the matching comment on Register<T> above.
+            builder.OnNonScopedCommitted = InitializeRegisteredInstance;
+            return builder;
         }
 
         /// <summary>
@@ -116,7 +131,7 @@ namespace mvcExpress
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public T Resolve<T>()
         {
-            return MvcFacade.Global.Resolve<T>();
+            return MvcFacade.Global.ResolveWithScope<T>(false, _context.Actor);
         }
 
         /// <summary>
@@ -128,7 +143,35 @@ namespace mvcExpress
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryResolve<T>(out T value)
         {
-            return MvcFacade.Global.TryResolve<T>(out value);
+            return MvcFacade.Global.TryResolveWithScope(false, out value, _context.Actor);
+        }
+
+        // Global proxies and IMvcLifecycle services are wired immediately because this is a
+        // dynamic runtime registration from a command, outside any module/facade-owned
+        // registration phase - see the matching comment on
+        // FacadeGlobalContainerApi/ModuleGlobalContainerApi.InitializeRegisteredInstance. Proxy
+        // and ProxyBehaviour call CompleteInitialization()/InitializeGlobal() internally, which
+        // runs InjectMembers before OnInitialized. Plain IMvcLifecycle services must be injected
+        // explicitly here before the callback, and tracked so OnCleanup() runs at facade
+        // destroy.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void InitializeRegisteredInstance(object instance)
+        {
+            if (instance is ProxyBehaviour proxyBehaviour)
+            {
+                proxyBehaviour.InitializeGlobal(MvcFacade.Global, MvcFacade.MessageBus);
+            }
+            else if (instance is Proxy proxy)
+            {
+                var moduleType = _context.ResolveModule()?.ModuleType ?? typeof(MvcFacade);
+                proxy.Initialize(moduleType, MvcFacade.MessageBus, MvcFacade.Global);
+            }
+            else if (instance is IMvcLifecycle initializable)
+            {
+                MvcInjectionUtility.InjectMembers(instance, MvcFacade.Global, useViewScope: false);
+                initializable.OnInitialized();
+                MvcFacade.FacadeInstance.TrackGlobalLifecycleService(initializable);
+            }
         }
     }
 }

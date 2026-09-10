@@ -5,7 +5,12 @@ using mvcExpress.Logging;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
 using UnityEngine;
+// Aliased rather than "using System.Diagnostics;" - that namespace also contains
+// System.Diagnostics.Debug, which would collide with UnityEngine.Debug (used throughout this
+// file) and turn every unqualified Debug.* call below into a CS0104 ambiguous-reference error.
+using Stopwatch = System.Diagnostics.Stopwatch;
 
 namespace mvcExpress
 {
@@ -59,6 +64,12 @@ namespace mvcExpress
         /// rather than creating a new one. Use <see cref="InstanceOrNull"/> when you need a
         /// null-safe check and do not want to force creation.
         /// </remarks>
+        /// <exception cref="MvcCompositionException">
+        /// A <c>[RegisterGlobal]</c> attribute was invalid the first time the facade initialized.
+        /// </exception>
+        /// <exception cref="InvalidOperationException">
+        /// The facade already failed to initialize once; it will not silently retry.
+        /// </exception>
         public static MvcFacade FacadeInstance
         {
             get
@@ -67,7 +78,23 @@ namespace mvcExpress
                     return _facadeInstance;
 
                 if (_facadeInstance != null && _facadeInstance.gameObject != null)
+                {
+                    // Checks the stored failure directly instead of calling InitializeIfNeeded()
+                    // again - calling it here would be reentrant and infinitely recurse whenever
+                    // this property is reached from *inside* an in-progress InitializeIfNeeded()
+                    // call, which is exactly what happens for the documented
+                    // RegisterGlobalServices()/RegisterGlobalProxies() -> GlobalDependencies.Register()
+                    // -> MvcFacade.Global -> FacadeInstance path (a prior attempt at this fix called
+                    // InitializeIfNeeded() here and broke that path with a stack overflow).
+                    // _initializationFailure is only non-null once that call has already unwound, so
+                    // this check is safe to make unconditionally, on every access, including nested ones.
+                    if (_facadeInstance._initializationFailure != null)
+                    {
+                        throw BuildAlreadyFailedException(_facadeInstance._initializationFailure);
+                    }
+
                     return _facadeInstance;
+                }
 
                 if (_facadeInstance == null || _facadeInstance.gameObject == null)
                 {
@@ -163,9 +190,10 @@ namespace mvcExpress
         /// Runs once, inside <c>InitializeIfNeeded</c>, before any <see cref="MvcModule"/> has
         /// registered with the facade - so every module can resolve these dependencies from its
         /// very first initialization phase with no race condition. Runs after the Inspector-driven
-        /// Global Services registry and the <c>[RegisterGlobal]</c> attribute drain, so this
-        /// override wins on conflict for the same type - matching the Inspector -> Attribute -> Code
-        /// precedence used by <see cref="MvcModule"/>'s own initialization pipeline.
+        /// Global Services registry and the <c>[RegisterGlobal]</c> attribute drain, matching the
+        /// Inspector -> Attribute -> Code order used by <see cref="MvcModule"/>'s own initialization
+        /// pipeline. This only determines which source registers a type first: registering the same
+        /// type from more than one source throws, it does not silently override the earlier one.
         /// </remarks>
         protected virtual void RegisterGlobalServices() { }
 
@@ -179,9 +207,10 @@ namespace mvcExpress
         /// and before any <see cref="MvcModule"/> has registered with the facade - so every module
         /// can resolve these dependencies from its very first initialization phase with no race
         /// condition. Runs after the Inspector-driven Global Proxies registry and the
-        /// <c>[RegisterGlobal]</c> attribute drain, so this override wins on conflict for the same
-        /// type - matching the Inspector -> Attribute -> Code precedence used by
-        /// <see cref="MvcModule"/>'s own initialization pipeline.
+        /// <c>[RegisterGlobal]</c> attribute drain, matching the Inspector -> Attribute -> Code
+        /// order used by <see cref="MvcModule"/>'s own initialization pipeline. This only determines
+        /// which source registers a type first: registering the same type from more than one source
+        /// throws, it does not silently override the earlier one.
         /// </remarks>
         protected virtual void RegisterGlobalProxies() { }
 
@@ -197,6 +226,51 @@ namespace mvcExpress
         // Tracks and initializes services registered in the global scope; cleaned up on OnDestroy.
         private mvcExpress.Internal.Initialization.GlobalServiceRegistrar _globalServiceRegistrar;
 
+        // Plain (non-Proxy) IMvcLifecycle instances registered globally via code
+        // (FacadeGlobalContainerApi/ModuleGlobalContainerApi) or the [RegisterGlobal] attribute,
+        // in the order their OnInitialized() was called. Inspector-sourced services are already
+        // tracked separately by _globalServiceRegistrar (Proxies never need this - they have their
+        // own OnInitialized/OnCleanup and are torn down by _globalContainer.Dispose() itself, same
+        // as any other IDisposable/ProxyBehaviour it owns).
+        private readonly List<IMvcLifecycle> _globalLifecycleServices = new List<IMvcLifecycle>();
+
+        // Called from FacadeGlobalContainerApi/ModuleGlobalContainerApi's InitializeRegisteredInstance
+        // and from DrainAttributeGlobalRegistrations, right after OnInitialized().
+        internal void TrackGlobalLifecycleService(IMvcLifecycle service)
+        {
+            if (service != null) _globalLifecycleServices.Add(service);
+        }
+
+        // Calls OnCleanup() on every tracked global lifecycle service in reverse registration
+        // order (last registered, first cleaned up), mirroring ModuleInitializer.CleanupServices().
+        // Must run before the global container is disposed/cleared. Idempotent: the
+        // list is empty (a no-op loop) after the first call.
+        private void CleanupGlobalLifecycleServices()
+        {
+            for (int i = _globalLifecycleServices.Count - 1; i >= 0; i--)
+            {
+                var service = _globalLifecycleServices[i];
+                try
+                {
+                    service.OnCleanup();
+                }
+                catch (Exception ex)
+                {
+                    // Also logged via Unity's own Debug.LogException, unconditionally - a teardown
+                    // exception must be visible even in a clean release build, unlike routine
+                    // diagnostic logging.
+                    MvcDebug.LogError(
+                        $"[MvcFacade] Global service '{service.GetType().FullName}' threw during OnCleanup: {ex.Message}");
+                    Debug.LogException(ex);
+                }
+                finally
+                {
+                    _globalContainer.ReleaseScopedInstancesFor(service);
+                }
+            }
+            _globalLifecycleServices.Clear();
+        }
+
         // Single bus shared by all modules and global actors; owned here, referenced by modules.
         private readonly MvcMessageBus _messageBus = new MvcMessageBus();
 
@@ -206,17 +280,164 @@ namespace mvcExpress
         // Actions enqueued by MessengerApi.PublishDeferred from any thread; drained each Update on the main thread.
         private readonly ConcurrentQueue<Action> _deferredPublishes = new ConcurrentQueue<Action>();
 
+        // Guards against a race: a background thread reading a non-null
+        // _facadeInstance into a local, then enqueuing into that instance's queue, at the same
+        // moment OnDestroy is tearing this facade down. Without a shared gate, that enqueue can
+        // land in the queue *after* OnDestroy's own final drain has already run (or after the
+        // facade is otherwise gone for the frame), silently stranding the action forever even
+        // though the caller was told the enqueue succeeded. OnDestroy takes this lock first, sets
+        // _deferredPublishClosed, and only then drains - so every enqueue either (a) completes
+        // before the close and is guaranteed to be in the queue when that final drain runs, or
+        // (b) observes the close and correctly returns false instead of silently succeeding.
+        private readonly object _deferredPublishLock = new object();
+        private bool _deferredPublishClosed;
+
+        // These two monotonic counters let Update() (and the pending-count
+        // telemetry below) know exactly how much work is queued without ever calling
+        // ConcurrentQueue<T>.Count, which sums per-segment head/tail deltas across however many
+        // segments the queue currently has - genuinely more segments, and more cost, under exactly
+        // the sustained-producer load this feature exists to protect against. A subtraction of two
+        // cheap atomic reads is O(1) regardless of queue depth or segment count.
+        // _enqueuedSequence is written only under _deferredPublishLock (so the plain increment is
+        // race-free) but read from any thread without that lock, so every read goes through
+        // Interlocked.Read for tear-safety and cross-thread visibility. _drainedSequence is written
+        // only from the main thread (Update/OnDestroy are both Unity lifecycle callbacks), so it
+        // never needs Interlocked on the write side - only readers on other threads need the atomic
+        // read.
+        private long _enqueuedSequence;
+        private long _drainedSequence;
+
+        /// <summary>
+        /// Per-frame budget knobs for the deferred-publish queue drained in <see cref="Update"/>.
+        /// Both default to "unlimited" (the original, always-drain-everything behavior) so existing
+        /// projects see no change unless they opt in. Set either to bound how much main-thread time
+        /// a burst of <c>PublishDeferred</c> calls from background threads can spend in one frame -
+        /// a producer that queues faster than one frame can drain would
+        /// otherwise monopolize <see cref="Update"/> indefinitely.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Overload policy is "carries over, never drops": whatever a budget leaves undrained this
+        /// frame simply waits and is eligible again next frame (see <see cref="Update"/>'s
+        /// frame-start snapshot). This project chose the non-lossy default deliberately - a
+        /// deferred publish exists specifically because the caller cannot publish synchronously
+        /// right now, so silently dropping it (drop-newest/drop-oldest) would be a correctness
+        /// regression a caller has no way to detect. A project that genuinely needs a lossy policy
+        /// under sustained overload should implement it at the call site (e.g. rate-limit before
+        /// calling <c>PublishDeferred</c>), where it has the domain context to choose what to drop.
+        /// </para>
+        /// <para>
+        /// <b>What the unlimited default does and does not protect against:</b> it fully prevents a
+        /// <i>continuous</i> producer from monopolizing every frame forever - the frame-start
+        /// snapshot in <see cref="Update"/> already bounds one <c>Update</c> call's work to what was
+        /// queued before that frame began, regardless of this budget. It does NOT protect against a
+        /// large backlog that is already sitting in the queue when a frame starts (e.g. a burst
+        /// enqueued while the game was paused, or before any facade existed to drain it) - under the
+        /// default, that entire backlog still drains in the one frame that first observes it, which
+        /// can still spike that frame. Set a finite budget if pre-existing backlogs, not just
+        /// sustained producers, are a concern for your project.
+        /// </para>
+        /// <para>
+        /// Invalid values are rejected rather than silently accepted - see the setters below. A
+        /// negative <see cref="MaxDeferredPublishesPerFrame"/> would otherwise make the drain loop's
+        /// own budget check false on its very first comparison, stalling the queue forever, which is
+        /// worse than the frame spike this feature exists to prevent.
+        /// </para>
+        /// </remarks>
+        public static int MaxDeferredPublishesPerFrame
+        {
+            get => _maxDeferredPublishesPerFrame;
+            set
+            {
+                if (value < 0)
+                {
+                    MvcDebug.LogWarning(
+                        $"[MvcFacade] MaxDeferredPublishesPerFrame cannot be negative (got {value}); " +
+                        "clamping to 0. A negative value would stall the deferred-publish queue forever " +
+                        "instead of merely limiting it.");
+                    value = 0;
+                }
+                _maxDeferredPublishesPerFrame = value;
+            }
+        }
+        private static int _maxDeferredPublishesPerFrame = int.MaxValue;
+
+        /// <summary>See <see cref="MaxDeferredPublishesPerFrame"/>. Time-based sibling budget, in
+        /// milliseconds of wall-clock time spent draining the queue this frame.</summary>
+        public static double MaxDeferredPublishMillisecondsPerFrame
+        {
+            get => _maxDeferredPublishMillisecondsPerFrame;
+            set
+            {
+                if (double.IsNaN(value))
+                {
+                    MvcDebug.LogWarning(
+                        "[MvcFacade] MaxDeferredPublishMillisecondsPerFrame cannot be NaN; " +
+                        "ignoring and keeping the current value.");
+                    return;
+                }
+                if (value < 0)
+                {
+                    MvcDebug.LogWarning(
+                        $"[MvcFacade] MaxDeferredPublishMillisecondsPerFrame cannot be negative (got {value}); " +
+                        "clamping to 0. A negative value would stall the deferred-publish queue forever " +
+                        "instead of merely limiting it.");
+                    value = 0;
+                }
+                _maxDeferredPublishMillisecondsPerFrame = value;
+            }
+        }
+        private static double _maxDeferredPublishMillisecondsPerFrame = double.MaxValue;
+
+        /// <summary>
+        /// Number of deferred-publish actions currently queued and not yet run. Watch this (or
+        /// <see cref="PeakDeferredPublishCount"/>) to notice a producer
+        /// that is outrunning the per-frame drain before it becomes a frame-time problem.
+        /// </summary>
+        /// <remarks>
+        /// Computed as enqueued-minus-drained (two sequence counters) rather than
+        /// <c>ConcurrentQueue&lt;T&gt;.Count</c> - see the fields' comments above. Safe to poll from
+        /// any thread, including every frame from your own code, at constant cost regardless of how
+        /// deep the queue is.
+        /// </remarks>
+        public static int PendingDeferredPublishCount
+        {
+            get
+            {
+                var facade = _facadeInstance;
+                if (facade == null) return 0;
+                return (int)(Interlocked.Read(ref facade._enqueuedSequence) - Interlocked.Read(ref facade._drainedSequence));
+            }
+        }
+
+        /// <summary>
+        /// High-water mark of <see cref="PendingDeferredPublishCount"/> observed at the end of any
+        /// <see cref="Update"/> since the current facade instance was created (reset on the next
+        /// <c>Awake</c>, including after a Domain Reload-disabled play session restarts).
+        /// </summary>
+        public static int PeakDeferredPublishCount { get; private set; }
+
         /// <summary>
         /// Enqueues a publish action to run on the main thread during the next Update.
         /// Called by <see cref="MessengerApi.PublishDeferred{TMessage}()"/> from any thread.
-        /// Returns false (and drops the action) when the facade has already been destroyed.
+        /// Returns false (and drops the action) when the facade has already been destroyed or is
+        /// in the process of being destroyed - see the <see cref="_deferredPublishLock"/> remarks.
         /// </summary>
         internal static bool TryEnqueueDeferredPublish(Action publishAction)
         {
             var facade = _facadeInstance;
             if (facade == null) return false;
-            facade._deferredPublishes.Enqueue(publishAction);
-            return true;
+
+            lock (facade._deferredPublishLock)
+            {
+                if (facade._deferredPublishClosed) return false;
+                facade._deferredPublishes.Enqueue(publishAction);
+                // Plain increment, not Interlocked - already inside the lock, which is the only
+                // writer-side synchronization this field needs. Readers (Update, OnDestroy,
+                // PendingDeferredPublishCount) use Interlocked.Read for their side of the contract.
+                facade._enqueuedSequence++;
+                return true;
+            }
         }
 
         // Called by MvcModule.TryGetMediatorPrefab as a fallback after checking the module's own registry.
@@ -313,6 +534,11 @@ namespace mvcExpress
 
         private bool _initialized; // guards InitializeIfNeeded() so it runs exactly once per instance
 
+        // [RegisterGlobal] failures found so far this drain - same non-conditional trick as
+        // ModuleInitializer._compositionFailures. Cleared at the start of each drain so a manual
+        // re-drain (e.g. in tests) doesn't accumulate stale entries.
+        private readonly List<string> _globalCompositionFailures = new List<string>();
+
         /// <summary>
         /// Unity lifecycle. Enforces the singleton pattern, resets the quit flag (needed when
         /// Domain Reload is disabled), and runs one-time initialization.
@@ -331,6 +557,12 @@ namespace mvcExpress
                 return;
             }
 
+            // Same Domain-Reload-disabled reasoning as _isQuitting above: a stale high-water mark
+            // from the previous play session should not carry into this one. Reset only after this
+            // instance is accepted as the singleton (above) - a duplicate must not be able to wipe
+            // the real singleton's telemetry on its way to self-destructing.
+            PeakDeferredPublishCount = 0;
+
             _facadeInstance = this;
             InitializeIfNeeded();
         }
@@ -348,10 +580,57 @@ namespace mvcExpress
         /// Unity lifecycle. Drains publish actions queued via <see cref="TryEnqueueDeferredPublish"/>
         /// so they execute on the main thread before game logic runs this frame.
         /// </summary>
+        /// <remarks>
+        /// Drains only a frame-start snapshot of the queue, not "until observed empty".
+        /// Under the default unlimited budget this drains everything that was queued before this
+        /// Update began - identical to the old behavior - but never chases new arrivals a
+        /// concurrent producer enqueues *during* this same drain; those simply wait for next
+        /// frame's snapshot. That bounds one Update call's deferred-publish work to a size known
+        /// at its start, which is what actually stops a continuous background producer from
+        /// monopolizing a single frame; <see cref="MaxDeferredPublishesPerFrame"/>/
+        /// <see cref="MaxDeferredPublishMillisecondsPerFrame"/> then let a project also cap that
+        /// per-frame work below the snapshot size when even one frame's backlog is too much.
+        /// <para>
+        /// Perf follow-up: the snapshot and pending-count telemetry are both derived from
+        /// <see cref="_enqueuedSequence"/>/<see cref="_drainedSequence"/> instead of
+        /// <c>ConcurrentQueue&lt;T&gt;.Count</c>, so this method costs the same two cheap atomic
+        /// reads every frame whether the queue is empty or deep, instead of a cost that scales with
+        /// how many internal segments the queue has accumulated.
+        /// </para>
+        /// </remarks>
         private void Update()
         {
-            while (_deferredPublishes.TryDequeue(out var action))
+            long targetSequence = Interlocked.Read(ref _enqueuedSequence);
+
+            // Sample the peak BEFORE draining, not just after: under the (default) unlimited
+            // budget the drain loop below empties the queue down to targetSequence every frame, so
+            // a post-drain-only sample would almost always read ~0 regardless of how large the
+            // burst was - defeating the whole point of a high-water mark. This captures the true
+            // frame-start backlog size; the post-drain sample below still runs too, to also catch a
+            // concurrent producer that enqueues past targetSequence while this Update is draining.
+            long frameStartPending = targetSequence - _drainedSequence;
+            if (frameStartPending > PeakDeferredPublishCount)
+                PeakDeferredPublishCount = (int)frameStartPending;
+
+            int budget = MaxDeferredPublishesPerFrame;
+            double millisecondBudget = MaxDeferredPublishMillisecondsPerFrame;
+            // Stopwatch only allocated when a time budget is actually configured - the default
+            // (unbudgeted) path stays allocation-free, consistent with this method previously
+            // doing no per-frame allocation of its own.
+            Stopwatch timeBudgetStopwatch = millisecondBudget < double.MaxValue ? Stopwatch.StartNew() : null;
+
+            int processed = 0;
+            while (_drainedSequence < targetSequence && processed < budget)
             {
+                if (timeBudgetStopwatch != null && timeBudgetStopwatch.Elapsed.TotalMilliseconds >= millisecondBudget)
+                    break;
+
+                if (!_deferredPublishes.TryDequeue(out var action))
+                    break; // Shouldn't happen while _drainedSequence < targetSequence, but never spin past reality.
+
+                _drainedSequence++;
+                processed++;
+
                 try
                 {
                     action();
@@ -364,6 +643,10 @@ namespace mvcExpress
                     Debug.LogException(e);
                 }
             }
+
+            long pending = Interlocked.Read(ref _enqueuedSequence) - _drainedSequence;
+            if (pending > PeakDeferredPublishCount)
+                PeakDeferredPublishCount = (int)pending;
         }
 
         /// <summary>
@@ -402,11 +685,40 @@ namespace mvcExpress
         /// Clears all global container registrations and reinitializes global registrars.
         /// </summary>
         /// <remarks>
+        /// <para>
         /// Primarily intended for tests and deep resets. Runtime gameplay code should prefer
         /// explicit unregister operations for known transient global dependencies.
+        /// </para>
+        /// <para>
+        /// Reentrancy/lifecycle contract: every actor's
+        /// <c>OnCleanup()</c> that this call can reach runs before the container is cleared, and
+        /// plain code/attribute/Inspector-sourced <c>IMvcLifecycle</c> services are fully
+        /// round-trippable - re-registered and re-initialized correctly, with an <c>OnInitialized</c>
+        /// always paired to the <c>OnCleanup</c> that preceded it. Inspector-configured global
+        /// <see cref="ProxyBehaviour"/> instances are a documented exception: their
+        /// <c>OnCleanup()</c> runs correctly here, but their GameObject is still destroyed as a side
+        /// effect of the container clear that follows (the same disposal path any other registered
+        /// instance goes through), so they do not come back as a working, re-initialized instance
+        /// afterward the way a plain service does - re-adding one requires re-configuring it in the
+        /// Inspector before the next play/initialize, not merely calling this method again.
+        /// </para>
         /// </remarks>
         public void ClearGlobalContainer()
         {
+            // Lifecycle cleanup must run before the container is cleared/disposed.
+            // This must also reach Inspector-sourced global services: _globalServiceRegistrar
+            // tracks those separately from _globalLifecycleServices (see the field comment above)
+            // and is not touched by CleanupGlobalLifecycleServices(), so without this call an
+            // Inspector service's OnCleanup() would never run before InitializeGlobalServices()
+            // (below) re-registers and re-initializes the same instance.
+            CleanupGlobalLifecycleServices();
+            _globalServiceRegistrar?.Cleanup();
+
+            // Same reasoning, for Inspector-sourced global proxies. Runs OnCleanup()
+            // and resets the initialized flags now, synchronously, rather than leaving it to
+            // whatever OnDestroy() cascade eventually fires once the container clear below
+            // destroys these GameObjects (Unity defers that to end-of-frame in Play Mode).
+            _globalProxyRegistrar?.ResetTrackedProxiesForContainerClear();
             _globalContainer.Clear();
 
             // Re-initialize global registrars to clear their tracking lists
@@ -434,12 +746,48 @@ namespace mvcExpress
         }
 
         /// <summary>
-        /// Unity lifecycle. Disposes the message bus, cleans up global proxy and service
-        /// registrars, and clears the static facade reference.
+        /// Unity lifecycle. Cleans up every tracked global lifecycle service and registrar, then
+        /// disposes the global container and the message bus, then clears the static facade
+        /// reference.
         /// </summary>
+        /// <remarks>
+        /// Order matters: actors are cleaned up (their <c>OnCleanup()</c> may still
+        /// need to publish/unsubscribe) BEFORE the container that owns them is disposed, and the
+        /// container is disposed BEFORE the message bus so that cleanup code can still safely use
+        /// it.
+        /// <para>
+        /// Closes the deferred-publish gate first, before any other teardown step, so no
+        /// enqueue race (see <see cref="_deferredPublishLock"/>) can land an action after this
+        /// point; then immediately drains whatever is already queued - including anything that
+        /// raced in just before the close - while the message bus is still alive to deliver it.
+        /// This is a full, unbudgeted drain (not the budgeted <see cref="Update"/> snapshot): the
+        /// facade is not getting another frame, so there is no "next frame" left to carry work over
+        /// to, and losing queued publishes silently on teardown would defeat the whole point of the
+        /// race fix.
+        /// </para>
+        /// </remarks>
         private void OnDestroy()
         {
-            _messageBus?.Dispose();
+            lock (_deferredPublishLock)
+            {
+                _deferredPublishClosed = true;
+            }
+
+            while (_deferredPublishes.TryDequeue(out var action))
+            {
+                _drainedSequence++;
+
+                try
+                {
+                    action();
+                }
+                catch (Exception e)
+                {
+                    Debug.LogException(e);
+                }
+            }
+
+            CleanupGlobalLifecycleServices();
 
             if (_globalProxyRegistrar != null)
             {
@@ -453,17 +801,64 @@ namespace mvcExpress
                 _globalServiceRegistrar = null;
             }
 
+            // Disposes every uniquely-owned registration exactly once - IDisposable services/proxies
+            // and ProxyBehaviour GameObjects alike - covering Code- and
+            // Attribute-sourced global registrations that neither registrar above tracks.
+            _globalContainer.Dispose();
+
+            _messageBus?.Dispose();
+
             if (_facadeInstance == this)
             {
                 _facadeInstance = null;
             }
         }
 
-        // Runs DontDestroyOnLoad, scans assemblies for attribute-based registrations, and
-        // initializes global service/proxy registrars. Idempotent - guarded by _initialized.
+        // Set when a previous InitializeIfNeeded() call threw. Without this, a second call would
+        // just see _initialized still false and silently retry the whole sequence - re-running
+        // non-idempotent hooks (RegisterGlobalServices/RegisterGlobalProxies) and re-hitting the
+        // same failure. Mirrors ModuleInitializer's fail-once contract for a module.
+        private Exception _initializationFailure;
+
+        // Shared by both places that reject use of an already-failed facade: FacadeInstance's
+        // early-return branch (checked directly, never via InitializeIfNeeded() - see the long
+        // comment there about why) and InitializeIfNeeded() itself (reached via the find-or-create
+        // branch, e.g. an old failed facade found by FindAnyObjectByType after a domain reload).
+        private static InvalidOperationException BuildAlreadyFailedException(Exception failure)
+        {
+            return new InvalidOperationException(
+                "[MvcFacade] Cannot use the facade after global initialization failed. " +
+                $"Previous error: {failure.Message}", failure);
+        }
+
+        // Idempotent - guarded by _initialized. Actual work lives in InitializeIfNeededCore(); this
+        // wrapper only adds the fail-once behavior described on _initializationFailure above.
         private void InitializeIfNeeded()
         {
             if (_initialized) return;
+
+            if (_initializationFailure != null)
+            {
+                throw BuildAlreadyFailedException(_initializationFailure);
+            }
+
+            try
+            {
+                InitializeIfNeededCore();
+                _initialized = true;
+            }
+            catch (Exception ex)
+            {
+                _initializationFailure = ex;
+                throw;
+            }
+        }
+
+        // Scans assemblies for attribute-based registrations and initializes global service/proxy
+        // registrars. Split out from InitializeIfNeeded() so that wrapper can catch every exception
+        // this raises, including MvcCompositionException from a bad [RegisterGlobal] type.
+        private void InitializeIfNeededCore()
+        {
             DontDestroyOnLoad(gameObject);
 
             // Scan assemblies for [Register], [Bind], [Attach], [RegisterGlobal], [StartupModule]
@@ -502,8 +897,6 @@ namespace mvcExpress
             // the Inspector -> Attribute -> Code order used by MvcModule's initialization pipeline.
             RegisterGlobalServices();
             RegisterGlobalProxies();
-
-            _initialized = true;
         }
 
         // Discovers or creates the "Global Services" and "Global Proxies" child GameObjects,
@@ -666,7 +1059,19 @@ namespace mvcExpress
 
             lock (_moduleLock)
             {
-                wasRemoved = _modules.Remove(moduleType);
+                // Only remove the entry if it still holds THIS instance. A module that was
+                // rejected as a duplicate by RegisterModule (or any other instance that never
+                // owned the slot) must not be able to evict a different, currently-registered
+                // instance of the same type during its own teardown.
+                if (_modules.TryGetValue(moduleType, out var current) && ReferenceEquals(current, module))
+                {
+                    _modules.Remove(moduleType);
+                    wasRemoved = true;
+                }
+                else
+                {
+                    wasRemoved = false;
+                }
 
                 if (wasRemoved)
                 {
@@ -1085,11 +1490,15 @@ namespace mvcExpress
         // Plain C# types are created with Activator.CreateInstance; MonoBehaviour types (ProxyBehaviour
         // or MonoBehaviour service) are resolved to a scene instance under "Global Proxies"/"Global
         // Services" - reused if already tracked or hand-placed, created if none exists.
+        // Every entry is still attempted even if an earlier one is invalid; throws one aggregated
+        // MvcCompositionException at the end if anything failed (see the Clear()/throw below).
         private void DrainAttributeGlobalRegistrations()
         {
             var entries = mvcExpress.Internal.Initialization.AttributeScanner.GetGlobalRegistrationMetadata();
             if (entries.Count == 0)
                 return;
+
+            _globalCompositionFailures.Clear();
 
             // Collect instances so we can call CompleteInitialization after all are registered
             // (mirrors the deferred-init pattern used by GlobalProxyRegistrar and GlobalServiceRegistrar).
@@ -1132,7 +1541,17 @@ namespace mvcExpress
                     pendingObjects[i], _globalContainer, useViewScope: false);
 
                 if (pendingObjects[i] is IMvcLifecycle lifecycle)
+                {
                     lifecycle.OnInitialized();
+                    TrackGlobalLifecycleService(lifecycle);
+                }
+            }
+
+            // Everything was attempted and successes are fully initialized - now abort if any entry
+            // was invalid, reporting every failure at once instead of just the first.
+            if (_globalCompositionFailures.Count > 0)
+            {
+                throw new MvcCompositionException("global registration", _globalCompositionFailures);
             }
         }
 
@@ -1186,11 +1605,13 @@ namespace mvcExpress
 
                 if (resolution.Kind == mvcExpress.Internal.Initialization.MonoBehaviourResolutionKind.Ambiguous)
                 {
-                    MvcDebug.LogError(
+                    var failureMessage =
                         $"[RegisterGlobal] Type '{concreteType.FullName}' has {resolution.Conflicts.Length} " +
                         $"instances in the MvcFacade hierarchy: " +
                         $"{string.Join(", ", Array.ConvertAll(resolution.Conflicts, go => go.name))}. " +
-                        $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.");
+                        $"Remove the duplicate(s) so the correct instance is unambiguous. Skipping registration.";
+                    MvcDebug.LogError(failureMessage);
+                    _globalCompositionFailures.Add(failureMessage);
                     return;
                 }
 
@@ -1213,8 +1634,13 @@ namespace mvcExpress
                 }
                 catch (Exception ex)
                 {
-                    MvcDebug.LogError(
-                        $"[RegisterGlobal] Failed to create instance of '{concreteType.FullName}': {ex.Message}");
+                    // Activator.CreateInstance wraps a throwing constructor in TargetInvocationException -
+                    // unwrap it, or the recorded message hides the actual cause.
+                    var inner = ex is System.Reflection.TargetInvocationException ? ex.InnerException ?? ex : ex;
+                    var failureMessage =
+                        $"[RegisterGlobal] Failed to create instance of '{concreteType.FullName}': {inner.Message}";
+                    MvcDebug.LogError(failureMessage);
+                    _globalCompositionFailures.Add(failureMessage);
                     return;
                 }
             }
@@ -1259,8 +1685,10 @@ namespace mvcExpress
             }
             catch (Exception ex)
             {
-                MvcDebug.LogError(
-                    $"[RegisterGlobal] Failed to register '{concreteType.FullName}' into global container: {ex.Message}");
+                var failureMessage =
+                    $"[RegisterGlobal] Failed to register '{concreteType.FullName}' into global container: {ex.Message}";
+                MvcDebug.LogError(failureMessage);
+                _globalCompositionFailures.Add(failureMessage);
                 return;
             }
 

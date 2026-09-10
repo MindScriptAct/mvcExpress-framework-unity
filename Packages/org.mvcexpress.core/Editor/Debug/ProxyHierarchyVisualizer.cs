@@ -1,5 +1,6 @@
 ﻿using mvcExpress;
 using mvcExpress.Internal.DependencyInjection;
+using mvcExpress.Plugins;
 using System;
 using System.Collections.Generic;
 using System.Reflection;
@@ -26,7 +27,7 @@ namespace mvcExpress.Editor.InternalDebug
         private static MethodInfo RemoveHandlerMethod => _proxyRegisteredEvent?.GetRemoveMethod(true);
 
         // Mirrors the above for ProxyUnregisteredForDebug - lets us remove a wrapper GO directly
-        // instead of MvcDiContainer.UnregisterInternal scanning every MvcModule in the scene - see L11.
+        // instead of MvcDiContainer.UnregisterInternal scanning every MvcModule in the scene.
         private static readonly Dictionary<MvcDiContainer, Action<object>> _unregisterHandlers = new Dictionary<MvcDiContainer, Action<object>>();
         private static readonly EventInfo _proxyUnregisteredEvent = typeof(MvcDiContainer).GetEvent(
             "ProxyUnregisteredForDebug",
@@ -41,6 +42,28 @@ namespace mvcExpress.Editor.InternalDebug
         private static readonly Dictionary<MvcDiContainer, (Transform Owner, string RootName)> _ownerRoots =
             new Dictionary<MvcDiContainer, (Transform, string)>();
 
+        // A module that registers with MvcFacade after the play-mode-entry HookAllModules() snapshot (e.g.
+        // one instantiated dynamically mid-play) used to be caught only by an EditorApplication.update
+        // poll re-scanning every MvcModule in the scene once a second, for as long as play mode
+        // lasted. IModuleObserver.OnModuleRegistered already fires exactly when that happens - the
+        // event existed, it just wasn't wired to this visualizer. Hooking it directly makes the
+        // poll unnecessary: HookAllModules() now runs exactly twice per play session (once at
+        // domain-reload/delayCall if already playing, once at EnteredPlayMode) as the one-time
+        // reconstruction, and every module after that is caught by this event instead of a scan.
+        private sealed class ModuleRegistrationObserver : IModuleObserver
+        {
+            public void OnModuleRegistered(Type moduleType)
+            {
+                var module = MvcFacade.InstanceOrNull?.GetModule(moduleType);
+                if (module != null) HookModule(module);
+            }
+
+            public void OnModuleInitialized(Type moduleType) { }
+            public void OnModuleUnregistered(Type moduleType) { }
+        }
+
+        private static readonly ModuleRegistrationObserver _moduleObserver = new ModuleRegistrationObserver();
+
         static ProxyHierarchyVisualizer()
         {
             EditorApplication.playModeStateChanged += OnPlayModeChanged;
@@ -51,20 +74,7 @@ namespace mvcExpress.Editor.InternalDebug
                     HookAllModules();
                 }
             };
-            EditorApplication.update += OnEditorUpdate;
-        }
-
-        private static double _nextUpdate;
-
-        private static void OnEditorUpdate()
-        {
-            if (!Application.isPlaying) return;
-
-            // TEMP: periodically ensure hooks exist (covers proxies registered very early when entering play mode)
-            if (EditorApplication.timeSinceStartup < _nextUpdate) return;
-            _nextUpdate = EditorApplication.timeSinceStartup + 1.0d;
-
-            HookAllModules();
+            MvcPluginBus.Register(_moduleObserver);
         }
 
         private static void OnPlayModeChanged(PlayModeStateChange state)
@@ -307,7 +317,7 @@ namespace mvcExpress.Editor.InternalDebug
 
         // Removes the wrapper GO for a code-only proxy that was just unregistered from `container`.
         // Looks up the owner root recorded in HookModule/HookGlobal instead of creating one (a
-        // container that never had any proxies registered has no Model root to search) - see L11.
+        // container that never had any proxies registered has no Model root to search).
         private static void OnProxyUnregistered(MvcDiContainer container, object proxy)
         {
             if (proxy == null) return;

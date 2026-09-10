@@ -1,6 +1,6 @@
 ﻿using mvcExpress.Internal.DependencyInjection;
 using mvcExpress.Internal.Interfaces;
-using mvcExpress.Internal.Proxy;
+using mvcExpress.Internal.Proxies;
 using mvcExpress.Logging;
 using System;
 using System.Collections.Generic;
@@ -22,7 +22,7 @@ namespace mvcExpress.Internal.Initialization
     ///     tracked in <c>_registeredProxyBehaviours</c>.
     ///   </description></item>
     ///   <item><description>
-    ///     <see cref="Proxy"/> - plain C# objects created by attribute or code registration;
+    ///     <see cref="Proxies"/> - plain C# objects created by attribute or code registration;
     ///     tracked in <c>_registeredCodeProxies</c>.
     ///   </description></item>
     /// </list>
@@ -193,6 +193,15 @@ namespace mvcExpress.Internal.Initialization
                 var proxy = _registeredCodeProxies[i];
                 if (proxy == null) continue;
 
+                // Scoped lifetime redesign: OnContainerRegistering (MvcModule.cs) tracks a code
+                // Proxy here unconditionally, before the caller's builder chain has even decided
+                // whether it ends in .AsScoped() - so a throwaway seed instance handed to
+                // .AsScoped() can end up tracked here too. Skip it: .AsScoped() never stores that
+                // instance in the container (RegistrationBuilder.Complete()'s scoped branch only
+                // records registration identity), so it must never receive real initialization -
+                // the container constructs its own dedicated instance per injectee on resolve.
+                if (_container.IsScoped(proxy.GetType())) continue;
+
                 proxy.Initialize(_moduleType, _messageBus, _container, deferOnInitialized: true);
                 proxy.CompleteInitialization();
             }
@@ -217,7 +226,11 @@ namespace mvcExpress.Internal.Initialization
                     }
                     catch (Exception ex)
                     {
+                        // Also logged via Unity's own Debug.LogException,
+                        // unconditionally - a teardown exception must be visible even in a clean
+                        // release build, unlike routine diagnostic logging.
                         MvcDebug.LogError($"Error disposing proxy: {ex.Message}");
+                        Debug.LogException(ex);
                     }
                 }
             }

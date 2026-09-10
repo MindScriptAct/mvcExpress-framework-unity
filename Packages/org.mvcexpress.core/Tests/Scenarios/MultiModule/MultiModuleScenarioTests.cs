@@ -9,10 +9,10 @@ using Object = UnityEngine.Object;
 namespace mvcExpress.Tests.Scenarios
 {
     /// <summary>
-    /// Multi-module scenarios built from the same runtime primitives each MvcModule owns:
-    /// one local DI container, one message bus, one command processor, and one module context.
-    /// The tests keep global dependencies as an explicit shared container so the distinction
-    /// between module-local and application-wide scope stays visible.
+    /// Multi-module scenarios for the fundamental application topology: each module owns its
+    /// local DI container, command processor, and module context, while all modules communicate
+    /// through exactly one application-wide message bus. Global dependencies use an explicit
+    /// shared container so dependency scope remains distinct from message delivery scope.
     /// </summary>
     [TestFixture]
     [Category("Scenario")]
@@ -21,6 +21,7 @@ namespace mvcExpress.Tests.Scenarios
         private ModuleHarness _moduleA;
         private ModuleHarness _moduleB;
         private MvcDiContainer _globalContainer;
+        private MvcMessageBus _messageBus;
 
         private sealed class NoInitModule : MvcModule
         {
@@ -36,19 +37,18 @@ namespace mvcExpress.Tests.Scenarios
             public readonly MvcMessageBus MessageBus;
             public readonly MvcCommandProcessor Processor;
 
-            public ModuleHarness(string name)
+            public ModuleHarness(string name, MvcMessageBus messageBus)
             {
                 GameObject = new GameObject(name);
                 Module = GameObject.AddComponent<NoInitModule>();
                 Container = new MvcDiContainer();
-                MessageBus = new MvcMessageBus();
+                MessageBus = messageBus;
                 Processor = new MvcCommandProcessor(typeof(NoInitModule), Container, MessageBus, Module);
             }
 
             public void Dispose()
             {
                 Processor.Dispose();
-                MessageBus.Dispose();
                 Container.Dispose();
 
                 if (GameObject != null)
@@ -118,8 +118,9 @@ namespace mvcExpress.Tests.Scenarios
         [SetUp]
         public void SetUp()
         {
-            _moduleA = new ModuleHarness("ScenarioModuleA");
-            _moduleB = new ModuleHarness("ScenarioModuleB");
+            _messageBus = new MvcMessageBus();
+            _moduleA = new ModuleHarness("ScenarioModuleA", _messageBus);
+            _moduleB = new ModuleHarness("ScenarioModuleB", _messageBus);
             _globalContainer = new MvcDiContainer();
         }
 
@@ -129,6 +130,7 @@ namespace mvcExpress.Tests.Scenarios
             _moduleA?.Dispose();
             _moduleB?.Dispose();
             _globalContainer?.Dispose();
+            _messageBus?.Dispose();
         }
 
         [Test]
@@ -151,19 +153,23 @@ namespace mvcExpress.Tests.Scenarios
         }
 
         [Test]
-        public void TwoModules_IndependentMessageBuses_MessageDoesNotCrossModules()
+        public void TwoModules_SharedApplicationBus_MessageReachesBothModules()
         {
             var moduleACount = 0;
             var moduleBCount = 0;
+
+            Assert.That(_moduleA.MessageBus, Is.SameAs(_moduleB.MessageBus),
+                "Every module in one application must use the same MessageBus instance.");
+
             _moduleA.MessageBus.Subscribe<LocalBusMessage, int>(_ => moduleACount++);
             _moduleB.MessageBus.Subscribe<LocalBusMessage, int>(_ => moduleBCount++);
 
             _moduleA.MessageBus.Publish<LocalBusMessage, int>(1);
 
             Assert.That(moduleACount, Is.EqualTo(1),
-                "Publishing on Module A's bus should notify Module A subscribers.");
-            Assert.That(moduleBCount, Is.EqualTo(0),
-                "A separate message bus instance should not receive Module A publishes.");
+                "Publishing from Module A must notify Module A subscribers.");
+            Assert.That(moduleBCount, Is.EqualTo(1),
+                "Publishing from Module A must notify matching subscribers in Module B.");
         }
 
         [Test]
@@ -257,16 +263,15 @@ namespace mvcExpress.Tests.Scenarios
             CrossModuleCommand.Reset();
             CrossModuleMediator.Reset();
 
-            using var sharedBus = new MvcMessageBus();
-            var moduleBProcessor = new MvcCommandProcessor(typeof(NoInitModule), _moduleB.Container, sharedBus, _moduleB.Module);
+            var moduleBProcessor = new MvcCommandProcessor(typeof(NoInitModule), _moduleB.Container, _messageBus, _moduleB.Module);
             moduleBProcessor.BindCommand<CrossModuleCommand, CrossModuleMessage, int>();
 
             var mediatorGo = new GameObject("CrossModuleMediator");
             mediatorGo.transform.SetParent(_moduleB.GameObject.transform);
             var mediator = mediatorGo.AddComponent<CrossModuleMediator>();
-            mediator.Initialize(_moduleB.Module, _moduleB.Container, sharedBus);
+            mediator.Initialize(_moduleB.Module, _moduleB.Container, _messageBus);
 
-            sharedBus.Publish<CrossModuleMessage, int>(5);
+            _moduleA.MessageBus.Publish<CrossModuleMessage, int>(5);
 
             Assert.That(CrossModuleCommand.ExecuteCount, Is.EqualTo(1),
                 "The first publish on the shared bus must execute Module B's bound command.");
@@ -278,7 +283,7 @@ namespace mvcExpress.Tests.Scenarios
             moduleBProcessor.Dispose();
             Object.DestroyImmediate(mediatorGo);
 
-            Assert.DoesNotThrow(() => sharedBus.Publish<CrossModuleMessage, int>(9),
+            Assert.DoesNotThrow(() => _moduleA.MessageBus.Publish<CrossModuleMessage, int>(9),
                 "A second publish after Module B's command processor and mediator are torn down " +
                 "must be a clean no-op - no exceptions from dangling subscriptions or bindings.");
             Assert.That(CrossModuleCommand.ExecuteCount, Is.EqualTo(1),

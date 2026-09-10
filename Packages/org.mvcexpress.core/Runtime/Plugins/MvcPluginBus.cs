@@ -129,23 +129,37 @@ namespace mvcExpress
 #endif
 
         // ── Log routing (production) ──────────────────────────────────────────
+        //
+        // These iterate a snapshot (not the live list) so an observer that unregisters itself
+        // from inside OnLog/OnWarning/OnError doesn't shrink the list mid-iteration and cause the
+        // next observer to be skipped for this dispatch. Exceptions are deliberately NOT caught
+        // here: ILogObserver is a documented production extension point for arbitrary third-party
+        // code (e.g. forwarding to Sentry), and silently swallowing its exceptions is the same
+        // "what happens when user code throws" policy question tracked for the message bus itself
+        // (see the messaging semantics decision register) - not a call to make unilaterally here.
 
         internal static void FireLog(string message, MvcLogContext context)
         {
-            for (int i = 0; i < _logObservers.Count; i++)
-                _logObservers[i].OnLog(message, context);
+            if (_logObservers.Count == 0) return;
+            var snapshot = _logObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+                snapshot[i].OnLog(message, context);
         }
 
         internal static void FireWarning(string message, MvcLogContext context)
         {
-            for (int i = 0; i < _logObservers.Count; i++)
-                _logObservers[i].OnWarning(message, context);
+            if (_logObservers.Count == 0) return;
+            var snapshot = _logObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+                snapshot[i].OnWarning(message, context);
         }
 
         internal static void FireError(string message, MvcLogContext context)
         {
-            for (int i = 0; i < _logObservers.Count; i++)
-                _logObservers[i].OnError(message, context);
+            if (_logObservers.Count == 0) return;
+            var snapshot = _logObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+                snapshot[i].OnError(message, context);
         }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -174,11 +188,47 @@ namespace mvcExpress
 
         // ── Message events ────────────────────────────────────────────────────
 
+        // FireMessagePublished/FireMessageDispatched run once per Publish()/per-handler while at
+        // least one IMessageObserver is registered - a live dev-tooling path, not a rare one like
+        // the lifecycle/registration events below. So instead of ToArray()'s per-call allocation,
+        // they dispatch over a reused scratch buffer snapshotted at the start of each call: any
+        // registration or unregistration during dispatch mutates only the live _messageObservers
+        // list, never the buffer already being iterated, so there is no index bookkeeping to get
+        // wrong (an earlier index-adjustment version of this code double-invoked the current
+        // observer when it removed a later, not-yet-visited one - see MSG-07 follow-up).
+        //
+        // The buffer is shared and reused across calls, so a call whose own observer callback
+        // triggers a nested Publish (and therefore a reentrant call to one of these two methods)
+        // would otherwise have its in-progress snapshot overwritten by the nested call. The depth
+        // counter detects that rare case and gives the nested call a one-off array instead.
+        private static IMessageObserver[] _messageObserverSnapshot = new IMessageObserver[4];
+        private static int _messageObserverDispatchDepth;
+
         internal static void FireMessagePublished(Type messageType, Type publisherModuleType)
         {
-            if (_messageObservers.Count == 0) return;
-            for (int i = 0; i < _messageObservers.Count; i++)
-                _messageObservers[i].OnMessagePublished(messageType, publisherModuleType);
+            var count = _messageObservers.Count;
+            if (count == 0) return;
+
+            _messageObserverDispatchDepth++;
+            try
+            {
+                var snapshot = SnapshotMessageObservers(count);
+                for (int i = 0; i < count; i++)
+                {
+                    try
+                    {
+                        snapshot[i].OnMessagePublished(messageType, publisherModuleType);
+                    }
+                    catch (Exception ex)
+                    {
+                        MvcDebug.LogWarning($"IMessageObserver.OnMessagePublished threw: {ex}");
+                    }
+                }
+            }
+            finally
+            {
+                _messageObserverDispatchDepth--;
+            }
         }
 
         internal static void FireMessageDispatched(
@@ -187,10 +237,46 @@ namespace mvcExpress
             Type subscriberActorType,
             Type subscriberModuleType)
         {
-            if (_messageObservers.Count == 0) return;
-            for (int i = 0; i < _messageObservers.Count; i++)
-                _messageObservers[i].OnMessageDispatched(
-                    messageType, publisherModuleType, subscriberActorType, subscriberModuleType);
+            var count = _messageObservers.Count;
+            if (count == 0) return;
+
+            _messageObserverDispatchDepth++;
+            try
+            {
+                var snapshot = SnapshotMessageObservers(count);
+                for (int i = 0; i < count; i++)
+                {
+                    try
+                    {
+                        snapshot[i].OnMessageDispatched(
+                            messageType, publisherModuleType, subscriberActorType, subscriberModuleType);
+                    }
+                    catch (Exception ex)
+                    {
+                        MvcDebug.LogWarning($"IMessageObserver.OnMessageDispatched threw: {ex}");
+                    }
+                }
+            }
+            finally
+            {
+                _messageObserverDispatchDepth--;
+            }
+        }
+
+        private static IMessageObserver[] SnapshotMessageObservers(int count)
+        {
+            if (_messageObserverDispatchDepth > 1)
+            {
+                // Reentrant: an observer callback triggered another dispatch while the outer call is
+                // still mid-loop over the shared buffer. Give the nested call its own array so it
+                // can't stomp the outer call's in-progress snapshot. Rare - only when an observer
+                // itself causes a Publish.
+                return _messageObservers.ToArray();
+            }
+
+            if (_messageObserverSnapshot.Length < count) _messageObserverSnapshot = new IMessageObserver[count];
+            _messageObservers.CopyTo(_messageObserverSnapshot);
+            return _messageObserverSnapshot;
         }
 
         // ── Module lifecycle events ───────────────────────────────────────────
@@ -198,22 +284,34 @@ namespace mvcExpress
         internal static void FireModuleRegistered(Type moduleType)
         {
             if (_moduleObservers.Count == 0) return;
-            for (int i = 0; i < _moduleObservers.Count; i++)
-                _moduleObservers[i].OnModuleRegistered(moduleType);
+            var snapshot = _moduleObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try { snapshot[i].OnModuleRegistered(moduleType); }
+                catch (Exception ex) { MvcDebug.LogWarning($"IModuleObserver.OnModuleRegistered threw: {ex}"); }
+            }
         }
 
         internal static void FireModuleInitialized(Type moduleType)
         {
             if (_moduleObservers.Count == 0) return;
-            for (int i = 0; i < _moduleObservers.Count; i++)
-                _moduleObservers[i].OnModuleInitialized(moduleType);
+            var snapshot = _moduleObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try { snapshot[i].OnModuleInitialized(moduleType); }
+                catch (Exception ex) { MvcDebug.LogWarning($"IModuleObserver.OnModuleInitialized threw: {ex}"); }
+            }
         }
 
         internal static void FireModuleUnregistered(Type moduleType)
         {
             if (_moduleObservers.Count == 0) return;
-            for (int i = 0; i < _moduleObservers.Count; i++)
-                _moduleObservers[i].OnModuleUnregistered(moduleType);
+            var snapshot = _moduleObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try { snapshot[i].OnModuleUnregistered(moduleType); }
+                catch (Exception ex) { MvcDebug.LogWarning($"IModuleObserver.OnModuleUnregistered threw: {ex}"); }
+            }
         }
 
         // ── Registration events ───────────────────────────────────────────────
@@ -221,29 +319,45 @@ namespace mvcExpress
         internal static void FireServiceRegistered(Type serviceType, Type moduleType, MvcLogContext.RegistrationSource source)
         {
             if (_registrationObservers.Count == 0) return;
-            for (int i = 0; i < _registrationObservers.Count; i++)
-                _registrationObservers[i].OnServiceRegistered(serviceType, moduleType, source);
+            var snapshot = _registrationObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try { snapshot[i].OnServiceRegistered(serviceType, moduleType, source); }
+                catch (Exception ex) { MvcDebug.LogWarning($"IRegistrationObserver.OnServiceRegistered threw: {ex}"); }
+            }
         }
 
         internal static void FireProxyRegistered(Type proxyType, Type moduleType, MvcLogContext.RegistrationSource source)
         {
             if (_registrationObservers.Count == 0) return;
-            for (int i = 0; i < _registrationObservers.Count; i++)
-                _registrationObservers[i].OnProxyRegistered(proxyType, moduleType, source);
+            var snapshot = _registrationObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try { snapshot[i].OnProxyRegistered(proxyType, moduleType, source); }
+                catch (Exception ex) { MvcDebug.LogWarning($"IRegistrationObserver.OnProxyRegistered threw: {ex}"); }
+            }
         }
 
         internal static void FireCommandBound(Type commandType, Type messageType, Type moduleType, MvcLogContext.RegistrationSource source)
         {
             if (_registrationObservers.Count == 0) return;
-            for (int i = 0; i < _registrationObservers.Count; i++)
-                _registrationObservers[i].OnCommandBound(commandType, messageType, moduleType, source);
+            var snapshot = _registrationObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try { snapshot[i].OnCommandBound(commandType, messageType, moduleType, source); }
+                catch (Exception ex) { MvcDebug.LogWarning($"IRegistrationObserver.OnCommandBound threw: {ex}"); }
+            }
         }
 
         internal static void FireMediatorAttached(Type mediatorType, Type moduleType, MvcLogContext.RegistrationSource source)
         {
             if (_registrationObservers.Count == 0) return;
-            for (int i = 0; i < _registrationObservers.Count; i++)
-                _registrationObservers[i].OnMediatorAttached(mediatorType, moduleType, source);
+            var snapshot = _registrationObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try { snapshot[i].OnMediatorAttached(mediatorType, moduleType, source); }
+                catch (Exception ex) { MvcDebug.LogWarning($"IRegistrationObserver.OnMediatorAttached threw: {ex}"); }
+            }
         }
 
         // ── Command events ────────────────────────────────────────────────────
@@ -251,8 +365,12 @@ namespace mvcExpress
         internal static void FireCommandExecuted(Type commandType, Type messageType, Type moduleType)
         {
             if (_commandObservers.Count == 0) return;
-            for (int i = 0; i < _commandObservers.Count; i++)
-                _commandObservers[i].OnCommandExecuted(commandType, messageType, moduleType);
+            var snapshot = _commandObservers.ToArray();
+            for (int i = 0; i < snapshot.Length; i++)
+            {
+                try { snapshot[i].OnCommandExecuted(commandType, messageType, moduleType); }
+                catch (Exception ex) { MvcDebug.LogWarning($"ICommandObserver.OnCommandExecuted threw: {ex}"); }
+            }
         }
 
 #endif

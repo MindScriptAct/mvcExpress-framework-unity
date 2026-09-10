@@ -111,8 +111,26 @@ namespace mvcExpress.Internal.Initialization
         {
             for (int i = _registeredServices.Count - 1; i >= 0; i--)
             {
-                if (_registeredServices[i] is IMvcLifecycle lifecycle)
-                    lifecycle.OnCleanup();
+                var service = _registeredServices[i];
+                try
+                {
+                    if (service is IMvcLifecycle lifecycle)
+                        lifecycle.OnCleanup();
+                }
+                catch (Exception ex)
+                {
+                    // This used to have no catch at all (only a finally),
+                    // so one throwing OnCleanup() would propagate out of the loop entirely,
+                    // skipping OnCleanup AND ReleaseScopedInstancesFor for every service still
+                    // earlier in iteration order, and never reaching _registeredServices.Clear()
+                    // below - teardown must continue for the rest of the list regardless.
+                    MvcDebug.LogError($"[GlobalServiceRegistrar] Service '{service.GetType().FullName}' threw during OnCleanup: {ex.Message}");
+                    Debug.LogException(ex);
+                }
+                finally
+                {
+                    _globalContainer.ReleaseScopedInstancesFor(service);
+                }
             }
             _registeredServices.Clear();
         }

@@ -4,17 +4,18 @@ using System.Runtime.CompilerServices;
 namespace mvcExpress.Internal.Interfaces
 {
     /// <summary>
-    /// Publish-only messaging interface for framework actors (proxies, commands, services).
+    /// Publishes messages on the single application-wide message bus.
     /// </summary>
     /// <remarks>
-    /// Publishes messages locally within the current module or to specific target modules.
-    /// Most actors can broadcast events but not subscribe (subscriptions are restricted to mediators).
+    /// One application has exactly one message bus, shared by every module and actor. Every publish
+    /// broadcasts to all matching subscribers in the application; this interface does not provide
+    /// module-local scope, target-module delivery, message bridges, or per-module filtering.
     /// </remarks>
     public interface IMessagePublisher
     {
-        // ==================== Local Module Publish ====================
+        // ==================== Application-wide Publish ====================
 
-        /// <summary>Publish a message without payload to all subscribers in the current module.</summary>
+        /// <summary>Publishes a message without payload to all matching subscribers in the application.</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         void Publish<TMessage>() where TMessage : IMessage;
 

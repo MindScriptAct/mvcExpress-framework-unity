@@ -20,9 +20,11 @@ namespace mvcExpress
         Transient = 1,
 
         /// <summary>
-        /// Scoped dependencies get a fresh instance per resolution scope (reused within
-        /// that scope, discarded when it ends). Only supported for types the container can
-        /// construct itself via <c>Activator.CreateInstance</c> - not MonoBehaviours.
+        /// Scoped dependencies get one dedicated instance per consuming actor (the "injectee"),
+        /// created on that actor's first resolution and disposed exactly once, when the actor
+        /// itself is torn down - not per resolution call or any other ambient window. Only
+        /// supported for types the container can construct itself via
+        /// <c>Activator.CreateInstance</c> - not MonoBehaviours.
         /// </summary>
         Scoped = 2,
     }

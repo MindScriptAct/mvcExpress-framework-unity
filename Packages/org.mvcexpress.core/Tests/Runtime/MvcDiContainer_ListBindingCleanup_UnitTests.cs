@@ -33,7 +33,7 @@ namespace mvcExpress.Tests
 
             Assert.That(weakMember.IsAlive, Is.False,
                 "Clear() must release _logicListMembers/_viewListMembers so a list-bound instance " +
-                "becomes collectable once the container itself has no other referrers. Before the M1 fix " +
+                "becomes collectable once the container itself has no other referrers. Before this fix " +
                 "these maps were never cleared, retaining every instance ever added via ToLogicList/ToViewList.");
         }
 

@@ -1,5 +1,5 @@
 using NUnit.Framework;
-using mvcExpress.Internal.Proxy;
+using mvcExpress.Internal.Proxies;
 using mvcExpress;
 using UnityEngine;
 

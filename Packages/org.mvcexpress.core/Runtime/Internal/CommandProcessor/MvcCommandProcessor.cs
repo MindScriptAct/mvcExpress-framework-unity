@@ -58,11 +58,11 @@ namespace mvcExpress.Internal.Commands
         /// Invoked whenever a bound or directly-run command throws during execution, in every
         /// build configuration - including release players without <c>MVC_LOGGING</c>, where
         /// <see cref="MvcDebug"/> calls compile away to nothing. Subscribe to route command
-        /// failures to a crash reporter or analytics pipeline - see M4.
+        /// failures to a crash reporter or analytics pipeline.
         /// </summary>
         public static event Action<Type, Exception> OnCommandFault;
 
-        // Single choke point for the M4 fix: every ExecuteCommandDirect*/ExecuteCommandDirectAsync*
+        // Single choke point: every ExecuteCommandDirect*/ExecuteCommandDirectAsync*
         // catch block (across all 13 arity partials) calls this instead of only logging in
         // Editor/Development builds, so a release player is never silently missing a command fault.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -93,7 +93,7 @@ namespace mvcExpress.Internal.Commands
             }
         }
 
-        // M5 fix: BindCommand<TCommand, TMessage[, T1..T12]> only constrains TCommand : MvcCommandBase,
+        // BindCommand<TCommand, TMessage[, T1..T12]> only constrains TCommand : MvcCommandBase,
         // so binding e.g. a zero-payload Command to an IMessage<int> compiles - at dispatch time
         // `cmd as Command<T1>` then silently returns null and the command never runs. Every
         // BindCommand/BindCommandAsync overload (across all 13 arity partials) calls this once, at
@@ -129,7 +129,7 @@ namespace mvcExpress.Internal.Commands
         // itself (not "this processor") - a bare method-group conversion at the subscribe call site
         // would be collectible immediately, silently killing pool invalidation after any GC even
         // while the processor is alive. Dispose() already unsubscribes explicitly, so this field
-        // only needs to keep the delegate alive between construction and disposal - see H2.
+        // only needs to keep the delegate alive between construction and disposal.
         private readonly Action<Type> _transientRemovalHandler;
 
 
@@ -233,7 +233,7 @@ namespace mvcExpress.Internal.Commands
 
         // Every IMessage<...> generic interface definition, arity 0-12, in payload-count order.
         // Used by UnbindAll<TMessage> to recover the payload Type[] for a message type that is
-        // only known as `TMessage : IMessageBase` at the call site - see L4.
+        // only known as `TMessage : IMessageBase` at the call site.
         private static readonly Type[] MessageInterfaceDefinitions =
         {
             typeof(IMessage<>), typeof(IMessage<,>), typeof(IMessage<,,>), typeof(IMessage<,,,>),
@@ -513,7 +513,7 @@ namespace mvcExpress.Internal.Commands
             // Drop every pooled command (disposing IDisposable ones) and null this processor's
             // slot in the static CommandPool<TCommand>.Pools array. Without this, the pools and
             // every command instance they hold (each pinning _moduleContext, _diContainer, and
-            // injected proxies/services) would be retained by static memory forever - see H1.
+            // injected proxies/services) would be retained by static memory forever.
             foreach (var trackingInfo in _poolsByCommandType.Values)
             {
                 trackingInfo.Pool?.Clear();
@@ -530,17 +530,22 @@ namespace mvcExpress.Internal.Commands
             RecycleInstanceId(_instanceId);
         }
 
-        [ThreadStatic]
-        private static bool _scopedDependencyResolved;
-
-        private void BeginCommandExecution() => _scopedDependencyResolved = false;
-        internal void OnScopedDependencyResolved() => _scopedDependencyResolved = true;
+        // Historical note: a [ThreadStatic] _scopedDependencyResolved flag used to force any
+        // command that resolved a Scoped dependency to be discarded after one execution - removed
+        // under the Scoped lifetime redesign (InternalSpecs/Architecture/SCOPED_LIFETIME_REDESIGN.md).
+        // A command's scoped dependency now has its own dedicated instance tied to that command
+        // INSTANCE's lifetime, so a pooled command can be reused normally; the dependency is
+        // released only when the instance is actually discarded (see DisposeDiscardedCommand and
+        // BoundedObjectPool<T>.DisposeIfNeeded). The flag also corrupted state under nested/
+        // reentrant command execution (an inner command's BeginCommandExecution() reset the outer
+        // command's flag, or vice versa) - removing the mechanism removes that bug too.
+        private void BeginCommandExecution() { }
 
         /// <summary>
         /// Returns a command to its pool for reuse, or discards it when it must not be reused
-        /// (scoped dependency resolved, marked invalid via <see cref="MvcCommandBase.Invalidate"/>,
-        /// or no pool available). Discarded commands are disposed here directly because they
-        /// bypass <see cref="BoundedObjectPool{T}.Return"/> - the only other place that invokes
+        /// (marked invalid via <see cref="MvcCommandBase.Invalidate"/>, or no pool available).
+        /// Discarded commands are disposed here directly because they bypass
+        /// <see cref="BoundedObjectPool{T}.Return"/> - the only other place that invokes
         /// <see cref="IDisposable"/> - entirely.
         /// </summary>
         internal void ReturnToPoolGeneric(MvcCommandBase command, BoundedObjectPool<MvcCommandBase> pool)
@@ -548,7 +553,7 @@ namespace mvcExpress.Internal.Commands
             if (command == null)
                 return;
 
-            if (pool == null || _scopedDependencyResolved || !command.IsValid)
+            if (pool == null || !command.IsValid)
             {
                 DisposeDiscardedCommand(command);
                 return;
@@ -559,6 +564,10 @@ namespace mvcExpress.Internal.Commands
 
         private static void DisposeDiscardedCommand(MvcCommandBase command)
         {
+            // Must run unconditionally (not only for IDisposable commands) - see the matching
+            // comment on BoundedObjectPool<T>.DisposeIfNeeded, the other true-discard path.
+            command.ReleaseOwnedScopedResources();
+
             if (command is not IDisposable disposable)
                 return;
 
@@ -635,6 +644,45 @@ namespace mvcExpress.Internal.Commands
 
         #region Pool Management
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        /// <summary>
+        /// Throws <see cref="InvalidOperationException"/> when a direct command-execution entry
+        /// point (<c>Run</c>/<c>RunAsync</c>/<c>CreatePool</c>) is called from a thread other than
+        /// the framework's authoritative main thread (PERF-07 follow-up). Active only in Editor/
+        /// Development builds - zero overhead in production.
+        /// </summary>
+        /// <remarks>
+        /// Unlike message-triggered command execution (already main-thread-only behind
+        /// <c>MvcMessageBus.Publish</c>'s own validation), direct execution had no such guarantee:
+        /// calling <c>Commander.Run&lt;TCommand&gt;()</c> from a background thread (e.g. inside an
+        /// un-awaited <c>Task.Run</c> continuation) used to be able to construct that command
+        /// type's <see cref="BoundedObjectPool{T}"/> on the wrong thread before the command was
+        /// ever bound, with confusing consequences later (see
+        /// <see cref="BoundedObjectPool{T}"/>'s own remarks). Validating here, before a pool is
+        /// ever touched, gives a diagnostic that points at the actual misuse (<c>Commander.Run</c>)
+        /// rather than an internal pooling class the caller has never heard of;
+        /// <see cref="BoundedObjectPool{T}"/>'s own check remains as defense in depth for any other
+        /// path that might reach it.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void ValidateMainThreadForDirectExecution([CallerMemberName] string callerName = "")
+        {
+            int currentId = Thread.CurrentThread.ManagedThreadId;
+            int mainThreadId = MvcMessageBus.MainThreadId;
+            if (currentId != mainThreadId)
+            {
+                throw new InvalidOperationException(
+                    $"Commander.{callerName} was called from a background thread " +
+                    $"(thread ID {currentId}; main thread ID {mainThreadId}).\n" +
+                    "Direct command execution and pool configuration are main-thread-only, the same " +
+                    "contract as Publish. If you're calling this after Task.Run or from a background " +
+                    "callback, await back to the main thread first (Unity's SynchronizationContext " +
+                    "does this automatically after any await inside a CommandAsync)."
+                );
+            }
+        }
+#endif
+
         /// <summary>
         /// Get or create a pool for the specified command type.
         /// If pool exists, returns it. If not, creates one with the specified default size.
@@ -680,6 +728,9 @@ namespace mvcExpress.Internal.Commands
         /// </summary>
         public void CreatePool<TCommand>(uint poolSize) where TCommand : MvcCommandBase, new()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            ValidateMainThreadForDirectExecution();
+#endif
             CommandPool<TCommand>.EnsureCapacity(_instanceId);
 
             lock (CommandPool<TCommand>.Lock)

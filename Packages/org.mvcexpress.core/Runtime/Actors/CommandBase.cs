@@ -24,8 +24,11 @@ namespace mvcExpress
     /// never be executed again - never when it is returned to the pool for reuse. This happens
     /// when: pooling is disabled for the command type (<c>poolSize == 0</c>), the pool is
     /// already at capacity, the pool is resized smaller or cleared (e.g. a transient
-    /// dependency the command used was unregistered), or the command resolved a scoped
-    /// dependency / was marked invalid during its own execution (see <see cref="IsValid"/>).
+    /// dependency the command used was unregistered), or the command was marked invalid during
+    /// its own execution (see <see cref="IsValid"/>). A Scoped <c>[Inject]</c> dependency no
+    /// longer forces discard - it is a dedicated instance tied to this command instance's own
+    /// lifetime, reused across pooled executions exactly like the command itself, and released
+    /// at the same point <c>Dispose()</c> would run (see <see cref="ReleaseOwnedScopedResources"/>).
     /// Do not rely on <c>Dispose()</c> for cleanup that must happen after every execution -
     /// pooled commands are reused many times without a matching <c>Dispose()</c> call in
     /// between; put per-execution cleanup at the end of <c>Execute()</c>/<c>ExecuteAsync()</c>
@@ -136,6 +139,11 @@ namespace mvcExpress
         /// </summary>
         protected CommanderApi Commander => _commander;
 
+        // Scoped lifetime redesign: lets MvcDiContainer.TryResolveScopedForOwner recover this
+        // command's own module/message-bus context when it needs to construct a scoped
+        // dependency that is itself a Proxy.
+        internal MvcActorContext ActorContext => _actorContext;
+
         /// <summary>
         /// Refreshes command context and, on the first execution only, injects dependencies
         /// and calls <see cref="OnInitialize"/>.
@@ -167,16 +175,33 @@ namespace mvcExpress
                 MvcLogContext.LogCategory.Command);
             _messenger = new MessengerApi(_actorContext);
             _container = new CommandContainerApi(_actorContext);
-            _globalContainer = new CommandGlobalContainerApi();
+            _globalContainer = new CommandGlobalContainerApi(_actorContext);
             _commander = new CommanderApi(_actorContext, commandProcessor);
 
             var processor = commandProcessor as MvcCommandProcessor;
-            using (diContainer.BeginScopedResolutionScope())
-            {
-                MvcInjectionUtility.InjectMembers(this, diContainer, useViewScope: false, processor);
-            }
+            // Scoped lifetime redesign: resolution is owned by `this` (the command instance),
+            // not by an ambient scope window - see MvcDiContainer.TryResolveScopedForOwner. No
+            // wrapping scope is needed here any more, so a Scoped dependency is still alive for
+            // OnInitialize()/Execute() below, instead of being disposed before either ever runs.
+            MvcInjectionUtility.InjectMembers(this, diContainer, useViewScope: false, processor);
             _hasBeenInjected = true;
             OnInitialize();
+        }
+
+        /// <summary>
+        /// Releases every Scoped dependency dedicated to this command instance. Called exactly
+        /// once, whenever this instance is actually discarded (never on an ordinary pooled
+        /// reuse) - see <see cref="MvcCommandProcessor.DisposeDiscardedCommand"/> and
+        /// <see cref="mvcExpress.Internal.Utilities.BoundedObjectPool{T}"/>'s discard path.
+        /// </summary>
+        internal void ReleaseOwnedScopedResources()
+        {
+            _diContainer?.ReleaseScopedInstancesFor(this);
+            var globalContainer = MvcFacade.GlobalContainerOrNull;
+            if (globalContainer != null && !ReferenceEquals(globalContainer, _diContainer))
+            {
+                globalContainer.ReleaseScopedInstancesFor(this);
+            }
         }
 
         /// <summary>

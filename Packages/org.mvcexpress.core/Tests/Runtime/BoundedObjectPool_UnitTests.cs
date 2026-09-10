@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using mvcExpress.Internal.Utilities;
 
@@ -184,6 +185,41 @@ namespace mvcExpress.Tests
             Assert.AreSame(a, pool.Get(), "First returned (a) must be last retrieved (LIFO).");
         }
 
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        /// <summary>
+        /// The pool used to lock every operation "just in case" a background thread called it. It doesn't
+        /// happen anywhere in this framework's supported design (see the class remarks), so the
+        /// lock was removed in favor of an Editor/Development-only assertion that catches a
+        /// same-class-of-mistake loudly instead of silently corrupting the unlocked Stack&lt;T&gt;.
+        /// </summary>
+        [Test]
+        public void Get_CalledFromBackgroundThread_ThrowsInvalidOperationException()
+        {
+            pool = new BoundedObjectPool<TestObject>(Factory, ResetObj, 5, 4);
+
+            var backgroundTask = Task.Run(() => pool.Get());
+
+            var aggregate = Assert.Throws<AggregateException>(() => backgroundTask.Wait());
+            Assert.IsInstanceOf<InvalidOperationException>(aggregate.InnerException,
+                "Get() called from any thread other than the one that constructed the pool must " +
+                "throw InvalidOperationException, not silently run (and not silently corrupt state).");
+        }
+
+        [Test]
+        public void Return_CalledFromBackgroundThread_ThrowsInvalidOperationException()
+        {
+            pool = new BoundedObjectPool<TestObject>(Factory, ResetObj, 5, 4);
+            var obj = pool.Get();
+
+            var backgroundTask = Task.Run(() => pool.Return(obj));
+
+            var aggregate = Assert.Throws<AggregateException>(() => backgroundTask.Wait());
+            Assert.IsInstanceOf<InvalidOperationException>(aggregate.InnerException,
+                "Return() called from any thread other than the one that constructed the pool must " +
+                "throw InvalidOperationException, not silently run.");
+        }
+#endif
+
 #if UNITY_EDITOR || MVC_LOGGING
         [Test]
         public void GetStatistics_AccuratelyTracksAllOperations()
@@ -209,14 +245,50 @@ namespace mvcExpress.Tests
             Assert.IsTrue(c.IsDisposed, "Discarded item must be disposed.");
 
             // Pool hit: Get from pool (no factory call), then Return it again.
-            // TotalReturned goes from 3 to 4, TotalCreated stays at 3.
-            // HitRate = (4 - 3) / 4 = 0.25 > 0.
-            var hit = pool.Get(); // pool hit - TotalCreated stays 3
-            pool.Return(hit);     // TotalReturned becomes 4
+            // TotalGets goes from 3 to 4, PooledGets goes from 0 to 1.
+            var hit = pool.Get(); // pool hit - TotalCreated stays 3, PooledGets becomes 1
+            pool.Return(hit);
 
             var statsAfterHit = pool.GetStatistics();
-            Assert.IsTrue(statsAfterHit.HitRate > 0f,
-                "HitRate must be > 0 when TotalReturned exceeds TotalCreated (same object returned twice).");
+            Assert.AreEqual(4, statsAfterHit.TotalGets, "TotalGets must count every Get() call.");
+            Assert.AreEqual(1, statsAfterHit.PooledGets, "PooledGets must count only Get() calls served from the pool.");
+            Assert.AreEqual(0.25f, statsAfterHit.HitRate, 0.0001f,
+                "HitRate must equal PooledGets / TotalGets.");
+        }
+
+        /// <summary>
+        /// Regression coverage: the previous HitRate formula, (TotalReturned - TotalCreated) /
+        /// TotalReturned, used TotalReturned as a stand-in for "total gets" - an assumption that
+        /// broke as soon as more than one Get() was outstanding (not yet Return()ed) at the same
+        /// time, which async command overlap makes a normal occurrence, not an edge case. HitRate
+        /// is now computed entirely from counters both incremented inside Get() itself
+        /// (TotalGets, PooledGets), so it can never go negative or depend on how many Get()s are
+        /// currently checked out.
+        /// </summary>
+        [Test]
+        public void GetStatistics_OverlappingOutstandingGets_HitRateNeverNegative()
+        {
+            pool = new BoundedObjectPool<TestObject>(Factory, ResetObj, 5, 4);
+
+            // Reproduces the scenario that made the old formula go negative: two Get()s land
+            // while only one prior Get() has ever been Return()ed, so "creates" outpaces
+            // "returns" at this snapshot even though every Get() is legitimate.
+            var first = pool.Get();  // miss: TotalCreated=1
+            pool.Return(first);      // pool now holds 1 item
+            var second = pool.Get(); // hit: pops the pooled item
+            var third = pool.Get();  // miss (pool empty again): TotalCreated=2
+            // Neither second nor third has been Return()ed yet - old formula: TotalReturned=1,
+            // TotalCreated=2 -> HitRate = (1 - 2) / 1 = -1.
+
+            var stats = pool.GetStatistics();
+            Assert.AreEqual(3, stats.TotalGets);
+            Assert.AreEqual(1, stats.PooledGets);
+            Assert.That(stats.HitRate, Is.GreaterThanOrEqualTo(0f),
+                "HitRate must never be negative, even with multiple Get()s outstanding.");
+            Assert.AreEqual(1f / 3f, stats.HitRate, 0.0001f);
+
+            pool.Return(second);
+            pool.Return(third);
         }
 #endif
     }

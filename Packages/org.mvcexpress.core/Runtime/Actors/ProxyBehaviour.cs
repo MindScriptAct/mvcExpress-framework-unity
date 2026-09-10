@@ -65,6 +65,11 @@ namespace mvcExpress
         /// </summary>
         protected GlobalContainerApi Global => _globalContainer;
 
+        // Scoped lifetime redesign: lets MvcDiContainer.TryResolveScopedForOwner recover this
+        // proxy's own module/message-bus context when it needs to construct a scoped dependency
+        // that is itself a Proxy.
+        internal MvcActorContext ActorContext => _actorContext;
+
         // State tracking
         private bool _dependenciesLinked;
         private bool _initialized;
@@ -76,9 +81,9 @@ namespace mvcExpress
         /// Called by the framework during <c>RegisterProxies()</c>. User code should not call this
         /// directly unless writing a custom registrar.
         /// </remarks>
-        /// <param name="module">Owning module instance; provides the DI scope and message bus.</param>
+        /// <param name="module">Owning module instance; provides the proxy's DI scope.</param>
         /// <param name="diContainer">Module DI container used for member injection and resolution.</param>
-        /// <param name="messageBus">Shared message publisher for this module scope.</param>
+        /// <param name="messageBus">Publisher for the single application-wide message bus.</param>
         /// <param name="deferOnInitialized">
         /// When <c>true</c>, skips the <see cref="OnInitialized"/> call so the registrar can batch all
         /// proxies before completing the phase. The registrar must call <see cref="CompleteInitialization"/>
@@ -106,7 +111,7 @@ namespace mvcExpress
                 MvcLogContext.LogCategory.Proxy);
             _messenger = new MessengerApi(_actorContext);
             _container = new ModuleContainerApi(_actorContext);
-            _globalContainer = new GlobalContainerApi(useViewScope: false);
+            _globalContainer = new GlobalContainerApi(_actorContext);
             _dependenciesLinked = true;
 
             if (!deferOnInitialized)
@@ -151,7 +156,7 @@ namespace mvcExpress
                 MvcLogContext.LogCategory.Proxy);
             _messenger = new MessengerApi(_actorContext);
             _container = new ModuleContainerApi(_actorContext);
-            _globalContainer = new GlobalContainerApi(useViewScope: false);
+            _globalContainer = new GlobalContainerApi(_actorContext);
             _dependenciesLinked = true;
 
             if (!deferOnInitialized)
@@ -170,10 +175,22 @@ namespace mvcExpress
                 return;
             }
 
+            // Set before running the fallible work below so a legitimate re-entrant resolution
+            // (e.g. a circular scoped-dependency graph) sees this proxy as already
+            // initializing and does not recurse. Reverted on failure so this proxy is not left
+            // permanently marked "initialized" when it never actually finished.
             _initialized = true;
 
-            MvcInjectionUtility.InjectMembers(this, _diContainer, useViewScope: false);
-            OnInitialized();
+            try
+            {
+                MvcInjectionUtility.InjectMembers(this, _diContainer, useViewScope: false);
+                OnInitialized();
+            }
+            catch
+            {
+                _initialized = false;
+                throw;
+            }
         }
 
         /// <summary>
@@ -188,17 +205,85 @@ namespace mvcExpress
         // Unity destroy hook; routes into the framework cleanup sequence.
         private void OnDestroy()
         {
-            if (_initialized)
+            // OnCleanup() must not be able to skip scoped-dependency release
+            // or reference clearing below - a throwing override used to abort this whole method,
+            // leaking every scoped dependency this proxy owned. The try/finally does not swallow
+            // the exception: it still propagates to Unity's own engine-level invocation of
+            // OnDestroy(), which logs it exactly like any other uncaught MonoBehaviour callback
+            // exception, without stopping teardown.
+            try
             {
-                OnCleanup();
+                if (_initialized)
+                {
+                    OnCleanup();
+                }
             }
+            finally
+            {
+                // Scoped lifetime redesign: this proxy is the injectee dying, so every Scoped
+                // dependency dedicated to it dies with it - see
+                // MvcDiContainer.ReleaseScopedInstancesFor and the disposal-trigger map in
+                // InternalSpecs/Architecture/SCOPED_LIFETIME_REDESIGN.md.
+                _diContainer?.ReleaseScopedInstancesFor(this);
+                var globalContainer = MvcFacade.GlobalContainerOrNull;
+                if (globalContainer != null && !ReferenceEquals(globalContainer, _diContainer))
+                {
+                    globalContainer.ReleaseScopedInstancesFor(this);
+                }
 
-            _diContainer = null;
-            _moduleContext = null;
-            _actorContext = default;
-            _messenger = default;
-            _container = default;
-            _globalContainer = default;
+                _diContainer = null;
+                _moduleContext = null;
+                _actorContext = default;
+                _messenger = default;
+                _container = default;
+                _globalContainer = default;
+            }
+        }
+
+        /// <summary>
+        /// Soft-resets this proxy for a global container reset - runs <see cref="OnCleanup"/> and releases owned scoped dependencies exactly like
+        /// <c>OnDestroy</c>, but does not null out framework references, since
+        /// <see cref="InitializeGlobal"/> is expected to run again immediately afterward. Also
+        /// clears the initialized flags so that next <c>InitializeGlobal</c>/
+        /// <c>CompleteInitialization</c> call performs a real re-injection and re-OnInitialized(),
+        /// not a silent no-op via the idempotency guard in <see cref="CompleteInitialization"/>.
+        /// </summary>
+        /// <remarks>
+        /// Only ever called from <see cref="Internal.Initialization.GlobalProxyRegistrar"/>'s
+        /// container-clear path, never from <c>OnDestroy</c>'s real-destruction path - calling
+        /// both on the same proxy in the same teardown would double-invoke <see cref="OnCleanup"/>.
+        /// Note this does not prevent the underlying GameObject from being destroyed by the global
+        /// container's own <c>Clear()</c> (which still finds and tears down this instance like any
+        /// other registered instance) - an Inspector-configured global proxy's GameObject does not
+        /// currently survive a container reset; this method only ensures its lifecycle callbacks
+        /// fire correctly and promptly for whatever window it has left, rather than being skipped
+        /// or deferred to the eventual, separate <c>OnDestroy</c> cascade.
+        /// </remarks>
+        internal void ResetForContainerClear()
+        {
+            // A throwing OnCleanup() must not be able to skip scoped
+            // release or the flag reset below - the caller (GlobalProxyRegistrar) already wraps
+            // this whole call in try/catch and logs, so letting the exception propagate out of the
+            // finally is safe and does not need a second catch here.
+            try
+            {
+                if (_initialized)
+                {
+                    OnCleanup();
+                }
+            }
+            finally
+            {
+                _diContainer?.ReleaseScopedInstancesFor(this);
+                var globalContainer = MvcFacade.GlobalContainerOrNull;
+                if (globalContainer != null && !ReferenceEquals(globalContainer, _diContainer))
+                {
+                    globalContainer.ReleaseScopedInstancesFor(this);
+                }
+
+                _initialized = false;
+                _dependenciesLinked = false;
+            }
         }
 
         /// <summary>

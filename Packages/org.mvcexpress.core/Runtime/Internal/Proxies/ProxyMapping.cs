@@ -5,7 +5,7 @@ using UnityEngine;
 using UnityEditor;
 #endif
 
-namespace mvcExpress.Internal.Proxy
+namespace mvcExpress.Internal.Proxies
 {
     /// <summary>
     /// Serializable Inspector mapping for registering a <see cref="ProxyBehaviour"/>.

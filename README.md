@@ -1,6 +1,6 @@
 # mvcExpress
 
-![Version](https://img.shields.io/badge/version-0.9.4-blue) ![Unity](https://img.shields.io/badge/unity-2021.3%2B-black) ![License](https://img.shields.io/badge/license-MIT-green)
+![Version](https://img.shields.io/badge/version-0.9.5-blue) ![Unity](https://img.shields.io/badge/unity-2021.3%2B-black) ![License](https://img.shields.io/badge/license-MIT-green)
 
 **A lightweight, type-safe MVC framework for Unity, built for performance and team scalability.**
 
@@ -35,7 +35,7 @@ Or add directly to `Packages/manifest.json`:
 Pin to a specific version by appending a tag:
 
 ```
-https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress.core#0.9.4
+https://github.com/MindScriptAct/mvcExpress-framework-unity.git?path=Packages/org.mvcexpress.core#0.9.5
 ```
 
 ## Why mvcExpress exists
@@ -48,9 +48,13 @@ The framework doesn't dictate everything beyond the four roles: it recommends go
 
 ## Architecture at a glance
 
+### One application, one MessageBus
+
+A single application-wide `MessageBus` is a fundamental mvcExpress design choice, not a configurable scope. `MvcFacade` owns exactly one bus, and every `MvcModule`, actor, command binding, mediator, and extension in the application uses that same instance. Publishing always broadcasts to every matching subscriber on the application bus, regardless of module ownership. There are no module-local buses, target-module buses, message bridges, or per-module delivery filters.
+
 ```
 MvcFacade (singleton, DontDestroyOnLoad)
- +- Global DI container + global message bus, shared by all modules
+ +- Global DI container + the single application MessageBus
  |
  +-- MvcModule           composition root for one scene / subsystem / subApp
       +-- Services       stateless helpers, calculations, SDK adapters, utils
@@ -65,7 +69,7 @@ View input becomes a published message. A bound Command reads/writes a Proxy and
 
 - **MVC actors** - Service/ServiceBehaviour, Proxy/ProxyBehaviour, Command/CommandAsync, MediatorBehaviour, each with one job and an enforced dependency direction
 - **Type-safe dependency injection** - constructor and `[Inject]` property injection, module-scoped and global containers, `TryResolve<T>` for optional lookups, no reflection in hot paths
-- **Typed message bus** - `IMessage` / `IMessage<T1..T12>`; prefer `readonly struct` for zero-GC publish; one bus shared across all modules
+- **Typed message bus** - exactly one application-wide bus shared by every module; `IMessage` / `IMessage<T1..T12>`; prefer `readonly struct` for zero-GC publish
 - **Async commands** - `CommandAsync<T...>` with `async`/`await`, bound identically to sync commands
 - **Command pooling** - fixed-size pools remove per-dispatch allocation for high-frequency messages
 - **Three registration styles, mixable per module** - Unity Inspector components, `[Register]`/`[Bind]`/`[Attach]` attributes, or code overrides
@@ -89,7 +93,7 @@ View input becomes a published message. A bound Command reads/writes a Proxy and
 ## Trade-offs
 
 - More ceremony than a raw MonoBehaviour for a one-off script: a simple action is a Message plus a Command plus a binding, not just a method call
-- The message bus is application-wide with no per-module filtering;
+- The single message bus broadcasts application-wide with no per-module filtering or targeted delivery; message types define communication boundaries instead
 - `CommandAsync` gets a module-scoped `CancelToken` automatically (cancelled when the module is destroyed), but Proxies and Services do not - they still need their own `CancellationTokenSource` if they run independent background work
 - Pre-1.0 (`0.9.x`): the public API is close to settled but may still shift before `1.0`, and some tooling (composition-style hard enforcement, the debugging suite) is still in progress
 - Opinionated by design: teams that want unrestricted freedom in where logic lives may feel the actor boundaries as friction

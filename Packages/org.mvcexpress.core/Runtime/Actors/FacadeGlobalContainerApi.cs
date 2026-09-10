@@ -36,7 +36,10 @@ namespace mvcExpress
             }
 
             var builder = MvcFacade.Global.Register(instance);
-            InitializeRegisteredInstance(instance);
+            // Deferred until the builder chain commits as non-scoped - see
+            // RegistrationBuilder<T>.OnNonScopedCommitted. A .AsScoped() chain must never
+            // initialize this throwaway seed instance.
+            builder.OnNonScopedCommitted = InitializeRegisteredInstance;
             return builder;
         }
 
@@ -59,7 +62,8 @@ namespace mvcExpress
             }
 
             var builder = MvcFacade.Global.Register(instance, type);
-            InitializeRegisteredInstance(instance);
+            // See the matching comment on Register<T> above.
+            builder.OnNonScopedCommitted = InitializeRegisteredInstance;
             return builder;
         }
 
@@ -107,6 +111,7 @@ namespace mvcExpress
             {
                 MvcInjectionUtility.InjectMembers(instance, MvcFacade.Global, useViewScope: false);
                 initializable.OnInitialized();
+                MvcFacade.FacadeInstance.TrackGlobalLifecycleService(initializable);
             }
         }
     }

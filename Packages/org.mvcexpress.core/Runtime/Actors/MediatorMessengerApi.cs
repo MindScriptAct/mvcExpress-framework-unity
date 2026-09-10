@@ -12,7 +12,7 @@ namespace mvcExpress
 {
     /// <summary>
     /// Bidirectional message bus facade for <see cref="MediatorBehaviour"/>: publish view events
-    /// upward and subscribe to module messages downward.
+    /// and subscribe to messages on the application's single message bus.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -23,6 +23,10 @@ namespace mvcExpress
     ///   <item><b>Subscribe</b> - react to model-state changes published by Services or Proxies
     ///   (e.g. <c>ScoreChangedMessage</c>) and update the view accordingly.</item>
     /// </list>
+    /// </para>
+    /// <para>
+    /// Every mediator in every module uses the same application-wide bus. Publications and
+    /// subscriptions are never module-local or targeted to a module.
     /// </para>
     /// <para>
     /// All subscriptions made through this API are tracked by the mediator's
@@ -1263,8 +1267,7 @@ namespace mvcExpress
         // ============================================================
         // Higher-level helpers built on Subscribe/Unsubscribe. Both allocate a wrapper
         // delegate to implement their extra behavior (auto-unsubscribe / condition check) -
-        // prefer plain Subscribe on hot-path messages. Arity 0-5 only; use plain Subscribe
-        // plus manual bookkeeping for higher arities.
+        // prefer plain Subscribe on hot-path messages. Arity 0-12.
 
         /// <summary>
         /// Subscribes the mediator to a no-payload message, automatically unsubscribing after
@@ -1555,6 +1558,342 @@ namespace mvcExpress
         }
 
         /// <summary>
+        /// Subscribes the mediator to a six-parameter message, automatically unsubscribing after
+        /// the first delivery. Useful for fire-once signals like a one-time transition or intro sequence.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6}"/>.</typeparam>
+        /// <param name="handler">Callback invoked exactly once, on the first <typeparamref name="TMessage"/> publish.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> that can be passed to <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6}"/> to
+        /// cancel before the first delivery. Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        /// <remarks>
+        /// Allocates a wrapper delegate to implement the auto-unsubscribe behavior - prefer a normal
+        /// <see cref="Subscribe{TMessage, T1, T2, T3, T4, T5, T6}"/> call on hot-path messages.
+        /// </remarks>
+        public SubscriptionToken SubscribeOnce<TMessage, T1, T2, T3, T4, T5, T6>(Action<T1, T2, T3, T4, T5, T6> handler) where TMessage : IMessage<T1, T2, T3, T4, T5, T6>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            SubscriptionToken token = default;
+            Action<T1, T2, T3, T4, T5, T6> wrapper = null;
+            wrapper = (p1, p2, p3, p4, p5, p6) =>
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                try
+                {
+                    handler(p1, p2, p3, p4, p5, p6);
+                }
+                finally
+                {
+                    bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6>(token);
+                    tracker.Untrack(typeof(TMessage), token);
+                }
+            };
+
+            token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6>(wrapper);
+            tracker.Track(typeof(TMessage), mediator, token, 6, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a seven-parameter message, automatically unsubscribing after
+        /// the first delivery. Useful for fire-once signals like a one-time transition or intro sequence.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7}"/>.</typeparam>
+        /// <param name="handler">Callback invoked exactly once, on the first <typeparamref name="TMessage"/> publish.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> that can be passed to <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7}"/> to
+        /// cancel before the first delivery. Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        /// <remarks>
+        /// Allocates a wrapper delegate to implement the auto-unsubscribe behavior - prefer a normal
+        /// <see cref="Subscribe{TMessage, T1, T2, T3, T4, T5, T6, T7}"/> call on hot-path messages.
+        /// </remarks>
+        public SubscriptionToken SubscribeOnce<TMessage, T1, T2, T3, T4, T5, T6, T7>(Action<T1, T2, T3, T4, T5, T6, T7> handler) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            SubscriptionToken token = default;
+            Action<T1, T2, T3, T4, T5, T6, T7> wrapper = null;
+            wrapper = (p1, p2, p3, p4, p5, p6, p7) =>
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                try
+                {
+                    handler(p1, p2, p3, p4, p5, p6, p7);
+                }
+                finally
+                {
+                    bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7>(token);
+                    tracker.Untrack(typeof(TMessage), token);
+                }
+            };
+
+            token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7>(wrapper);
+            tracker.Track(typeof(TMessage), mediator, token, 7, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to an eight-parameter message, automatically unsubscribing after
+        /// the first delivery. Useful for fire-once signals like a one-time transition or intro sequence.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8}"/>.</typeparam>
+        /// <param name="handler">Callback invoked exactly once, on the first <typeparamref name="TMessage"/> publish.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> that can be passed to <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8}"/> to
+        /// cancel before the first delivery. Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        /// <remarks>
+        /// Allocates a wrapper delegate to implement the auto-unsubscribe behavior - prefer a normal
+        /// <see cref="Subscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8}"/> call on hot-path messages.
+        /// </remarks>
+        public SubscriptionToken SubscribeOnce<TMessage, T1, T2, T3, T4, T5, T6, T7, T8>(Action<T1, T2, T3, T4, T5, T6, T7, T8> handler) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            SubscriptionToken token = default;
+            Action<T1, T2, T3, T4, T5, T6, T7, T8> wrapper = null;
+            wrapper = (p1, p2, p3, p4, p5, p6, p7, p8) =>
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                try
+                {
+                    handler(p1, p2, p3, p4, p5, p6, p7, p8);
+                }
+                finally
+                {
+                    bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8>(token);
+                    tracker.Untrack(typeof(TMessage), token);
+                }
+            };
+
+            token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8>(wrapper);
+            tracker.Track(typeof(TMessage), mediator, token, 8, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a nine-parameter message, automatically unsubscribing after
+        /// the first delivery. Useful for fire-once signals like a one-time transition or intro sequence.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8, T9}"/>.</typeparam>
+        /// <param name="handler">Callback invoked exactly once, on the first <typeparamref name="TMessage"/> publish.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> that can be passed to <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9}"/> to
+        /// cancel before the first delivery. Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        /// <remarks>
+        /// Allocates a wrapper delegate to implement the auto-unsubscribe behavior - prefer a normal
+        /// <see cref="Subscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9}"/> call on hot-path messages.
+        /// </remarks>
+        public SubscriptionToken SubscribeOnce<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9>(Action<T1, T2, T3, T4, T5, T6, T7, T8, T9> handler) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8, T9>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            SubscriptionToken token = default;
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9> wrapper = null;
+            wrapper = (p1, p2, p3, p4, p5, p6, p7, p8, p9) =>
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                try
+                {
+                    handler(p1, p2, p3, p4, p5, p6, p7, p8, p9);
+                }
+                finally
+                {
+                    bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9>(token);
+                    tracker.Untrack(typeof(TMessage), token);
+                }
+            };
+
+            token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9>(wrapper);
+            tracker.Track(typeof(TMessage), mediator, token, 9, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a ten-parameter message, automatically unsubscribing after
+        /// the first delivery. Useful for fire-once signals like a one-time transition or intro sequence.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10}"/>.</typeparam>
+        /// <param name="handler">Callback invoked exactly once, on the first <typeparamref name="TMessage"/> publish.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> that can be passed to <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10}"/> to
+        /// cancel before the first delivery. Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        /// <remarks>
+        /// Allocates a wrapper delegate to implement the auto-unsubscribe behavior - prefer a normal
+        /// <see cref="Subscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10}"/> call on hot-path messages.
+        /// </remarks>
+        public SubscriptionToken SubscribeOnce<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> handler) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            SubscriptionToken token = default;
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> wrapper = null;
+            wrapper = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10) =>
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                try
+                {
+                    handler(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10);
+                }
+                finally
+                {
+                    bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(token);
+                    tracker.Untrack(typeof(TMessage), token);
+                }
+            };
+
+            token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(wrapper);
+            tracker.Track(typeof(TMessage), mediator, token, 10, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to an eleven-parameter message, automatically unsubscribing after
+        /// the first delivery. Useful for fire-once signals like a one-time transition or intro sequence.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}"/>.</typeparam>
+        /// <param name="handler">Callback invoked exactly once, on the first <typeparamref name="TMessage"/> publish.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> that can be passed to <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}"/> to
+        /// cancel before the first delivery. Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        /// <remarks>
+        /// Allocates a wrapper delegate to implement the auto-unsubscribe behavior - prefer a normal
+        /// <see cref="Subscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}"/> call on hot-path messages.
+        /// </remarks>
+        public SubscriptionToken SubscribeOnce<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> handler) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            SubscriptionToken token = default;
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> wrapper = null;
+            wrapper = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11) =>
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                try
+                {
+                    handler(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11);
+                }
+                finally
+                {
+                    bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(token);
+                    tracker.Untrack(typeof(TMessage), token);
+                }
+            };
+
+            token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(wrapper);
+            tracker.Track(typeof(TMessage), mediator, token, 11, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a twelve-parameter message, automatically unsubscribing after
+        /// the first delivery. Useful for fire-once signals like a one-time transition or intro sequence.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}"/>.</typeparam>
+        /// <param name="handler">Callback invoked exactly once, on the first <typeparamref name="TMessage"/> publish.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> that can be passed to <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}"/> to
+        /// cancel before the first delivery. Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        /// <remarks>
+        /// Allocates a wrapper delegate to implement the auto-unsubscribe behavior - prefer a normal
+        /// <see cref="Subscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}"/> call on hot-path messages.
+        /// </remarks>
+        public SubscriptionToken SubscribeOnce<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> handler) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            SubscriptionToken token = default;
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> wrapper = null;
+            wrapper = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12) =>
+            {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                try
+                {
+                    handler(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12);
+                }
+                finally
+                {
+                    bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(token);
+                    tracker.Untrack(typeof(TMessage), token);
+                }
+            };
+
+            token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(wrapper);
+            tracker.Track(typeof(TMessage), mediator, token, 12, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
         /// Subscribes the mediator to a no-payload message, invoking <paramref name="handler"/>
         /// only when <paramref name="condition"/> evaluates to <c>true</c> at the time of publish.
         /// </summary>
@@ -1770,6 +2109,265 @@ namespace mvcExpress
 
             var token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5>(toSubscribe);
             tracker.Track(typeof(TMessage), mediator, token, 5, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a six-parameter message, invoking <paramref name="handler"/>
+        /// only when <paramref name="condition"/> evaluates to <c>true</c> at the time of publish.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6}"/>.</typeparam>
+        /// <param name="handler">Callback invoked when <typeparamref name="TMessage"/> is published and <paramref name="condition"/> is true.</param>
+        /// <param name="condition">Checked on every publish; the handler only runs when this returns <c>true</c>.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> for optional early removal via <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6}"/>.
+        /// Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        public SubscriptionToken SubscribeWhen<TMessage, T1, T2, T3, T4, T5, T6>(Action<T1, T2, T3, T4, T5, T6> handler, Func<bool> condition) where TMessage : IMessage<T1, T2, T3, T4, T5, T6>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            Action<T1, T2, T3, T4, T5, T6> toSubscribe = (p1, p2, p3, p4, p5, p6) =>
+            {
+                if (!condition()) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                handler(p1, p2, p3, p4, p5, p6);
+            };
+
+            var token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6>(toSubscribe);
+            tracker.Track(typeof(TMessage), mediator, token, 6, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a seven-parameter message, invoking <paramref name="handler"/>
+        /// only when <paramref name="condition"/> evaluates to <c>true</c> at the time of publish.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7}"/>.</typeparam>
+        /// <param name="handler">Callback invoked when <typeparamref name="TMessage"/> is published and <paramref name="condition"/> is true.</param>
+        /// <param name="condition">Checked on every publish; the handler only runs when this returns <c>true</c>.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> for optional early removal via <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7}"/>.
+        /// Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        public SubscriptionToken SubscribeWhen<TMessage, T1, T2, T3, T4, T5, T6, T7>(Action<T1, T2, T3, T4, T5, T6, T7> handler, Func<bool> condition) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            Action<T1, T2, T3, T4, T5, T6, T7> toSubscribe = (p1, p2, p3, p4, p5, p6, p7) =>
+            {
+                if (!condition()) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                handler(p1, p2, p3, p4, p5, p6, p7);
+            };
+
+            var token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7>(toSubscribe);
+            tracker.Track(typeof(TMessage), mediator, token, 7, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to an eight-parameter message, invoking <paramref name="handler"/>
+        /// only when <paramref name="condition"/> evaluates to <c>true</c> at the time of publish.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8}"/>.</typeparam>
+        /// <param name="handler">Callback invoked when <typeparamref name="TMessage"/> is published and <paramref name="condition"/> is true.</param>
+        /// <param name="condition">Checked on every publish; the handler only runs when this returns <c>true</c>.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> for optional early removal via <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8}"/>.
+        /// Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        public SubscriptionToken SubscribeWhen<TMessage, T1, T2, T3, T4, T5, T6, T7, T8>(Action<T1, T2, T3, T4, T5, T6, T7, T8> handler, Func<bool> condition) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            Action<T1, T2, T3, T4, T5, T6, T7, T8> toSubscribe = (p1, p2, p3, p4, p5, p6, p7, p8) =>
+            {
+                if (!condition()) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                handler(p1, p2, p3, p4, p5, p6, p7, p8);
+            };
+
+            var token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8>(toSubscribe);
+            tracker.Track(typeof(TMessage), mediator, token, 8, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a nine-parameter message, invoking <paramref name="handler"/>
+        /// only when <paramref name="condition"/> evaluates to <c>true</c> at the time of publish.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8, T9}"/>.</typeparam>
+        /// <param name="handler">Callback invoked when <typeparamref name="TMessage"/> is published and <paramref name="condition"/> is true.</param>
+        /// <param name="condition">Checked on every publish; the handler only runs when this returns <c>true</c>.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> for optional early removal via <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9}"/>.
+        /// Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        public SubscriptionToken SubscribeWhen<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9>(Action<T1, T2, T3, T4, T5, T6, T7, T8, T9> handler, Func<bool> condition) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8, T9>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9> toSubscribe = (p1, p2, p3, p4, p5, p6, p7, p8, p9) =>
+            {
+                if (!condition()) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                handler(p1, p2, p3, p4, p5, p6, p7, p8, p9);
+            };
+
+            var token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9>(toSubscribe);
+            tracker.Track(typeof(TMessage), mediator, token, 9, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a ten-parameter message, invoking <paramref name="handler"/>
+        /// only when <paramref name="condition"/> evaluates to <c>true</c> at the time of publish.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10}"/>.</typeparam>
+        /// <param name="handler">Callback invoked when <typeparamref name="TMessage"/> is published and <paramref name="condition"/> is true.</param>
+        /// <param name="condition">Checked on every publish; the handler only runs when this returns <c>true</c>.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> for optional early removal via <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10}"/>.
+        /// Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        public SubscriptionToken SubscribeWhen<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> handler, Func<bool> condition) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> toSubscribe = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10) =>
+            {
+                if (!condition()) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                handler(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10);
+            };
+
+            var token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(toSubscribe);
+            tracker.Track(typeof(TMessage), mediator, token, 10, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to an eleven-parameter message, invoking <paramref name="handler"/>
+        /// only when <paramref name="condition"/> evaluates to <c>true</c> at the time of publish.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}"/>.</typeparam>
+        /// <param name="handler">Callback invoked when <typeparamref name="TMessage"/> is published and <paramref name="condition"/> is true.</param>
+        /// <param name="condition">Checked on every publish; the handler only runs when this returns <c>true</c>.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> for optional early removal via <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}"/>.
+        /// Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        public SubscriptionToken SubscribeWhen<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> handler, Func<bool> condition) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> toSubscribe = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11) =>
+            {
+                if (!condition()) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                handler(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11);
+            };
+
+            var token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(toSubscribe);
+            tracker.Track(typeof(TMessage), mediator, token, 11, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(t));
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
+#endif
+            return token;
+        }
+
+        /// <summary>
+        /// Subscribes the mediator to a twelve-parameter message, invoking <paramref name="handler"/>
+        /// only when <paramref name="condition"/> evaluates to <c>true</c> at the time of publish.
+        /// </summary>
+        /// <typeparam name="TMessage">Message type to listen for. Must implement <see cref="IMessage{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}"/>.</typeparam>
+        /// <param name="handler">Callback invoked when <typeparamref name="TMessage"/> is published and <paramref name="condition"/> is true.</param>
+        /// <param name="condition">Checked on every publish; the handler only runs when this returns <c>true</c>.</param>
+        /// <returns>
+        /// A <see cref="SubscriptionToken"/> for optional early removal via <see cref="Unsubscribe{TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}"/>.
+        /// Returns <c>default</c> if the mediator is already destroyed.
+        /// </returns>
+        public SubscriptionToken SubscribeWhen<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> handler, Func<bool> condition) where TMessage : IMessage<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>
+        {
+            if (handler == null) throw new ArgumentNullException(nameof(handler));
+            if (condition == null) throw new ArgumentNullException(nameof(condition));
+            if (!CanSubscribe()) return default;
+            var mediator = Mediator;
+            var bus = Bus;
+            var tracker = mediator.SubscriptionTracker;
+
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> toSubscribe = (p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12) =>
+            {
+                if (!condition()) return;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                LogHandled<TMessage>(mediator);
+#endif
+                handler(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12);
+            };
+
+            var token = bus.Subscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(toSubscribe);
+            tracker.Track(typeof(TMessage), mediator, token, 12, t => bus.Unsubscribe<TMessage, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(t));
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             MvcPluginBus.TrackSubscriber(handler.Target, _context.ModuleType);
 #endif

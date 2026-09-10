@@ -192,11 +192,11 @@ namespace mvcExpress.Tests.Scenarios
         [Test]
         public void TransientProxy_UnregisteredAfterForcedGC_PoolStillInvalidated()
         {
-            // H2 regression guard: MvcCommandProcessor subscribes to transient-removal
+            // Regression guard: MvcCommandProcessor subscribes to transient-removal
             // notifications once, at construction (see SetUp). The bug was a weak reference to
             // an unrooted delegate, so any GC between subscribe and Unregister silently broke
             // invalidation forever after. Force a GC here - the other tests in this file never
-            // do, so they do not actually catch a H2 regression.
+            // do, so they do not actually catch this class of regression.
             _container.Register(new ScenarioTransientProxy()).ToLogic().AsTransient();
             _processor.CreatePool<UsesTransientProxyCommand>(poolSize: 1);
             _processor.Run<UsesTransientProxyCommand>();
@@ -212,7 +212,7 @@ namespace mvcExpress.Tests.Scenarios
             Assert.That(UsesTransientProxyCommand.CreatedCount, Is.EqualTo(2),
                 "After a GC occurs while the processor's transient-removal subscription is live, " +
                 "unregistering the transient dependency must still invalidate the pooled command. " +
-                "Before the H2 fix, the subscription delegate could be collected by the forced GC " +
+                "If the subscription were only weakly referenced, the delegate could be collected by the forced GC " +
                 "above, silently breaking invalidation with no error and no warning.");
             Assert.That(UsesTransientProxyCommand.LastProxyId, Is.EqualTo(2),
                 "The next execution after the forced GC and re-registration must resolve the new " +

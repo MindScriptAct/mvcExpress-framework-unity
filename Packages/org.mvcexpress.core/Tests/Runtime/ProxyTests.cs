@@ -1,6 +1,8 @@
 using System;
 using System.Reflection;
 using NUnit.Framework;
+using UnityEngine;
+using UnityEngine.TestTools;
 using mvcExpress;
 using mvcExpress.Internal.DependencyInjection;
 using mvcExpress.Internal.Messaging;
@@ -20,6 +22,12 @@ namespace mvcExpress.Tests
 
             protected override void OnInitialized() => OnInitializedCallCount++;
             protected override void OnCleanup()     => OnCleanupCallCount++;
+        }
+
+        // Throws from OnInitialized() to exercise the failed-initialization path.
+        private class ThrowingOnInitializedProxy : Proxy
+        {
+            protected override void OnInitialized() => throw new InvalidOperationException("Boom.");
         }
 
         // ── Fields ────────────────────────────────────────────────────────────
@@ -109,6 +117,20 @@ namespace mvcExpress.Tests
         }
 
         [Test]
+        public void CompleteInitialization_OnInitializedThrows_ProxyNotLeftMarkedInitialized()
+        {
+            var proxy = new ThrowingOnInitializedProxy();
+            proxy.Initialize(typeof(ThrowingOnInitializedProxy), _messageBus, _container, deferOnInitialized: true);
+
+            Assert.Throws<InvalidOperationException>(() => proxy.CompleteInitialization());
+
+            var initializedField = typeof(Proxy).GetField("_initialized", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.IsFalse((bool)initializedField.GetValue(proxy),
+                "A Proxy whose OnInitialized() throws must not be left marked as initialized - " +
+                "otherwise a later retry silently no-ops instead of re-attempting initialization.");
+        }
+
+        [Test]
         public void DisposalAndCleanup_CleansUpResourcesAndTriggersTeardown()
         {
             // Arrange - fully initialize the proxy.
@@ -176,6 +198,51 @@ namespace mvcExpress.Tests
             // because the proxy was already marked as disposed internally.
             Assert.DoesNotThrow(() => _proxy.Dispose(),
                 "Public Dispose() after the finalizer path must not throw.");
+        }
+
+        /// <summary>
+        /// Proxy used to declare its own finalizer (<c>~Proxy() =&gt; Dispose(false)</c>) as a "safety net" that
+        /// could never actually clean anything up, so every instance paid to be finalizable for no
+        /// benefit. This is the structural guarantee that fix relies on - deliberately independent
+        /// of GC timing, unlike <see cref="LeakCanary_UndisposedProxyCollected_LogsWarning"/> below.
+        /// </summary>
+        [Test]
+        public void Proxy_DoesNotDeclareItsOwnFinalizer()
+        {
+            var finalizeMethod = typeof(Proxy).GetMethod(
+                "Finalize", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            Assert.IsNotNull(finalizeMethod, "Precondition: every type has a Finalize method (inherited from object).");
+            Assert.AreNotEqual(typeof(Proxy), finalizeMethod.DeclaringType,
+                "Proxy must not declare/override Finalize (i.e. must not have a ~Proxy() finalizer). " +
+                "If this fails, a finalizer was reintroduced on the base class.");
+        }
+
+        // Creates an initialized-but-never-disposed proxy in its own stack frame so the JIT/Mono
+        // doesn't extend the local's liveness into the calling test method - matching the pattern
+        // WeakEventManager_UnitTests.cs already uses for the same reason.
+        private void CreateAndAbandonProxy()
+        {
+            var leaked = new TestProxy();
+            leaked.Initialize(typeof(TestProxy), _messageBus, _container, deferOnInitialized: false);
+            // Deliberately never Dispose() - this instance is meant to leak, on purpose, for the test below.
+        }
+
+        /// <summary>
+        /// The leak-detection canary that replaced Proxy's own finalizer must still catch
+        /// the case it exists for - an undisposed Proxy quietly falling out of scope - and log it.
+        /// </summary>
+        [Test]
+        public void LeakCanary_UndisposedProxyCollected_LogsWarning()
+        {
+            CreateAndAbandonProxy();
+
+            LogAssert.Expect(LogType.Warning,
+                new System.Text.RegularExpressions.Regex(@"\[Proxy leak\].*TestProxy"));
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect(); // second pass collects objects promoted to the finalization queue
         }
     }
 }

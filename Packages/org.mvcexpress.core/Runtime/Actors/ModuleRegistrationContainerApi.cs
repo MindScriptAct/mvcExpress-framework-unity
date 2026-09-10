@@ -185,7 +185,7 @@ namespace mvcExpress
         public bool TryResolve<T>(out T value)
         {
             _module.EnsureCoreServicesInitialized();
-            return _module.DiContainer.TryResolve<T>(out value);
+            return _module.DiContainer.TryResolve<T>(out value, caller: _module);
         }
 
         // Registration logs include caller file/line so console tooling can point users to setup code.

@@ -1,6 +1,8 @@
 using UnityEngine;
 using UnityEditor;
 using mvcExpress.Editor.Core;
+using mvcExpress.Plugins;
+using System;
 using System.Reflection;
 
 namespace mvcExpress.Editor.Inspectors
@@ -108,6 +110,7 @@ namespace mvcExpress.Editor.Inspectors
                 DrawContainerRow<ProxyRegistryBehaviour>(modelContainerProperty, "Model", 1);
                 DrawContainerRow<CommandBindingsBehaviour>(controllerContainerProperty, "Controller", 2);
                 DrawContainerRow<MediatorRegistryBehaviour>(viewContainerProperty, "View", 3);
+                DrawAdditionalActorRegistries();
             }
 
             // Draw user fields declared on derived modules (anything serialized that is not part of mvcExpress internals)
@@ -147,6 +150,15 @@ namespace mvcExpress.Editor.Inspectors
 
         private void DrawContainerRow<T>(SerializedProperty prop, string label, int siblingIndex) where T : Component
         {
+            DrawContainerRow(prop, label, typeof(T), siblingIndex);
+        }
+
+        // Non-generic core: EditorGUI.ObjectField, GetComponentInChildren, and AddComponent all
+        // have Type-parameter overloads, so this works for a componentType only known at
+        // runtime (via IHasAdditionalActorRegistries) without needing reflection to invoke a
+        // generic method.
+        private void DrawContainerRow(SerializedProperty prop, string label, Type componentType, int siblingIndex)
+        {
             var rowRect = EditorGUILayout.GetControlRect(false, EditorGUIUtility.singleLineHeight);
 
             var prevLabelWidth = EditorGUIUtility.labelWidth;
@@ -160,7 +172,7 @@ namespace mvcExpress.Editor.Inspectors
 
             // Draw a pure object field (single line) to avoid Unity laying out a multi-line property.
             EditorGUI.BeginProperty(fieldRect, new GUIContent(label), prop);
-            prop.objectReferenceValue = EditorGUI.ObjectField(fieldRect, label, prop.objectReferenceValue, typeof(T), true);
+            prop.objectReferenceValue = EditorGUI.ObjectField(fieldRect, label, prop.objectReferenceValue, componentType, true);
             EditorGUI.EndProperty();
 
             EditorGUIUtility.labelWidth = prevLabelWidth;
@@ -170,12 +182,17 @@ namespace mvcExpress.Editor.Inspectors
             {
                 if (GUI.Button(buttonRect, "Create"))
                 {
-                    CreateOrFindContainer<T>(prop, label, siblingIndex);
+                    CreateOrFindContainer(prop, componentType, label, siblingIndex);
                 }
             }
         }
 
         private void CreateOrFindContainer<T>(SerializedProperty prop, string defaultName, int siblingIndex) where T : Component
+        {
+            CreateOrFindContainer(prop, typeof(T), defaultName, siblingIndex);
+        }
+
+        private void CreateOrFindContainer(SerializedProperty prop, Type componentType, string defaultName, int siblingIndex)
         {
             if (target == null)
                 return;
@@ -185,7 +202,7 @@ namespace mvcExpress.Editor.Inspectors
                 return;
 
             // 1) scan children for existing container component
-            var existing = module.GetComponentInChildren<T>(includeInactive: true);
+            var existing = module.GetComponentInChildren(componentType, includeInactive: true);
             if (existing != null)
             {
                 prop.objectReferenceValue = existing;
@@ -197,7 +214,7 @@ namespace mvcExpress.Editor.Inspectors
             var foundT = module.transform.Find(defaultName);
             if (foundT != null)
             {
-                var foundC = foundT.GetComponent<T>();
+                var foundC = foundT.GetComponent(componentType);
                 if (foundC != null)
                 {
                     prop.objectReferenceValue = foundC;
@@ -213,7 +230,7 @@ namespace mvcExpress.Editor.Inspectors
             Undo.RegisterCreatedObjectUndo(go, "Create MVC Container");
             go.transform.SetParent(module.transform, false);
 
-            var c = Undo.AddComponent<T>(go);
+            var c = Undo.AddComponent(go, componentType);
             prop.objectReferenceValue = c;
 
             // Order them properly
@@ -228,6 +245,27 @@ namespace mvcExpress.Editor.Inspectors
 
             serializedObject.ApplyModifiedProperties();
             EditorUtility.SetDirty(module);
+        }
+
+        // Domain-agnostic extension point: any MvcModule subclass (in any package) can
+        // implement IHasAdditionalActorRegistries to get more Inspector rows here, using the
+        // exact same row-drawing/Create-button behavior as Services/Model/Controller/View,
+        // without MvcModuleEditor needing a virtual hook or subclass per domain.
+        private void DrawAdditionalActorRegistries()
+        {
+            if (target is not IHasAdditionalActorRegistries withExtra)
+                return;
+
+            var rows = withExtra.AdditionalActorRegistries;
+            if (rows == null) return;
+
+            for (int i = 0; i < rows.Length; i++)
+            {
+                var row = rows[i];
+                var prop = serializedObject.FindProperty(row.PropertyName);
+                if (prop == null) continue;
+                DrawContainerRow(prop, row.Label, row.ComponentType, row.SiblingIndex);
+            }
         }
 
         private void TrySetSiblingIndex(SerializedProperty containerProp, int index)
@@ -426,6 +464,8 @@ namespace mvcExpress.Editor.Inspectors
 
         private void DrawUserReferencesSection()
         {
+            var additionalInternalNames = GetAdditionalInternalPropertyNames();
+
             // Check if there are any user-defined properties to show
             bool hasUserProperties = false;
             SerializedProperty iterator = serializedObject.GetIterator();
@@ -440,7 +480,8 @@ namespace mvcExpress.Editor.Inspectors
                         iterator.name == "_servicesContainer" ||
                         iterator.name == "_controllerContainer" ||
                         iterator.name == "_viewContainer" ||
-                        iterator.name == "_moduleViewContainer")
+                        iterator.name == "_moduleViewContainer" ||
+                        Array.IndexOf(additionalInternalNames, iterator.name) >= 0)
                     {
                         continue;
                     }
@@ -466,15 +507,21 @@ namespace mvcExpress.Editor.Inspectors
             if (hasUserProperties)
             {
                 // Draw all user-defined properties
-                DrawPropertiesExcluding(
-                    serializedObject,
+                var fixedExcludedNames = new[]
+                {
                     "m_Script",
                     "_loggingEnabled",
                     "_modelContainer",
                     "_servicesContainer",
                     "_controllerContainer",
                     "_viewContainer",
-                    "_moduleViewContainer");
+                    "_moduleViewContainer"
+                };
+                var excludedNames = new string[fixedExcludedNames.Length + additionalInternalNames.Length];
+                fixedExcludedNames.CopyTo(excludedNames, 0);
+                additionalInternalNames.CopyTo(excludedNames, fixedExcludedNames.Length);
+
+                DrawPropertiesExcluding(serializedObject, excludedNames);
             }
             else
             {
@@ -483,6 +530,27 @@ namespace mvcExpress.Editor.Inspectors
                     "No custom references found.",
                     MessageType.Info);
             }
+        }
+
+        // Property names an IHasAdditionalActorRegistries target owns internally (e.g. Live
+        // Domain container fields) - these are already drawn as their own rows by
+        // DrawAdditionalActorRegistries, so DrawUserReferencesSection must not present them
+        // a second time as if they were the subclass's own custom fields.
+        private string[] GetAdditionalInternalPropertyNames()
+        {
+            if (target is not IHasAdditionalActorRegistries withExtra)
+                return Array.Empty<string>();
+
+            var rows = withExtra.AdditionalActorRegistries;
+            if (rows == null || rows.Length == 0)
+                return Array.Empty<string>();
+
+            var names = new string[rows.Length];
+            for (int i = 0; i < rows.Length; i++)
+            {
+                names[i] = rows[i].PropertyName;
+            }
+            return names;
         }
 
         private void DrawSettingsSection()

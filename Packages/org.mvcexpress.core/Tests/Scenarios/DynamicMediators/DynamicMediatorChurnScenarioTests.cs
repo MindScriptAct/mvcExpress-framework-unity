@@ -9,8 +9,8 @@ namespace mvcExpress.Tests.Scenarios
     /// <summary>
     /// "Popup storm" scenario: attach and detach a dynamic mediator repeatedly, each instance
     /// subscribing to three message types and manually unsubscribing one by token before detach.
-    /// Guards against SubscriptionTracker token collisions across message types (H3) and
-    /// unbounded handler-array growth under subscribe/unsubscribe churn (H4).
+    /// Guards against SubscriptionTracker token collisions across message types and
+    /// unbounded handler-array growth under subscribe/unsubscribe churn.
     /// </summary>
     [TestFixture]
     [Category("Scenario")]
@@ -49,7 +49,7 @@ namespace mvcExpress.Tests.Scenarios
 
                 // Manually unsubscribe MessageA before detach - both A and B are each the
                 // first subscriber for their type at this point in a fresh bus, so their
-                // tokens collide under the pre-H3-fix bug.
+                // tokens collide unless cross-type token identity is handled correctly.
                 Messenger.Unsubscribe<MessageA>(tokenA);
             }
         }
@@ -112,8 +112,8 @@ namespace mvcExpress.Tests.Scenarios
                         "publishing it must invoke zero handlers.");
                     Assert.That(PopupMediator.MessageBCount, Is.EqualTo(0),
                         "Iteration 0 checkpoint: MessageB and MessageA were both first-subscribers on " +
-                        "this fresh bus, so both received token (Index=0, Version=2). Before the H3 fix, " +
-                        "Untrack(tokenA) could remove MessageB's tracked entry instead (token collision " +
+                        "this fresh bus, so both received token (Index=0, Version=2). If cross-type token " +
+                        "identity were mishandled, Untrack(tokenA) could remove MessageB's tracked entry instead (token collision " +
                         "across message types), leaving MessageB's bus subscription untracked so " +
                         "UnsubscribeAll on mediator destroy would miss it and this handler would still fire.");
                     Assert.That(PopupMediator.MessageCCount, Is.EqualTo(0),
@@ -134,7 +134,7 @@ namespace mvcExpress.Tests.Scenarios
                 "publishing it after the storm must invoke zero handlers.");
             Assert.That(PopupMediator.MessageBCount, Is.EqualTo(0),
                 "MessageB relies on automatic cleanup via SubscriptionTracker.UnsubscribeAll when the " +
-                "mediator is destroyed. Before the H3 fix, Untrack(tokenA) could remove MessageB's " +
+                "mediator is destroyed. If cross-type token identity were mishandled, Untrack(tokenA) could remove MessageB's " +
                 "tracked entry instead (token collision across message types), leaving MessageB's bus " +
                 "subscription untracked - so UnsubscribeAll would miss it and this handler would still fire.");
             Assert.That(PopupMediator.MessageCCount, Is.EqualTo(0),

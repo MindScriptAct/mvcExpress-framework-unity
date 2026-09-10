@@ -68,12 +68,17 @@ namespace mvcExpress
         /// </summary>
         protected MediatorHubApi MediatorHub => _mediatorHub;
 
+        // Scoped lifetime redesign: lets MvcDiContainer.TryResolveScopedForOwner recover this
+        // mediator's own module/message-bus context when it needs to construct a scoped
+        // dependency that is itself a Proxy.
+        internal MvcActorContext ActorContext => _actorContext;
+
         /// <summary>
-        /// Initializes the mediator with module dependencies and messaging context.
+        /// Initializes the mediator with module dependencies and the application-wide messaging context.
         /// </summary>
         /// <param name="module">Owning module.</param>
         /// <param name="diContainer">Module dependency container.</param>
-        /// <param name="messageBus">Shared message bus.</param>
+        /// <param name="messageBus">The single application-wide message bus.</param>
         /// <param name="deferOnInitialized">When true, delays <see cref="OnInitialized"/> until the registrar completes the phase.</param>
         public void Initialize(MvcModule module, MvcDiContainer diContainer, IMessageBus messageBus, bool deferOnInitialized = false)
         {
@@ -93,7 +98,7 @@ namespace mvcExpress
                 MvcLogContext.LogCategory.Mediator);
             _messenger = new MediatorMessengerApi(_actorContext);
             _container = new ModuleContainerApi(_actorContext);
-            _globalContainer = new GlobalContainerApi(useViewScope: true);
+            _globalContainer = new GlobalContainerApi(_actorContext);
             _mediatorHub = new MediatorHubApi(this);
             _dependenciesLinked = true;
 
@@ -176,21 +181,44 @@ namespace mvcExpress
             if (_isDestroyed) return;
             _isDestroyed = true;
 
-            OnCleanup();
-
-            if (_messageBus != null)
+            // OnCleanup() must not be able to skip subscription removal, scoped-dependency
+            // release, or reference clearing below - a throwing override used to abort this whole
+            // method, leaking every message-bus subscription and scoped dependency this mediator
+            // owned (COR-16). The try/finally does not swallow the exception: it still propagates
+            // to the caller, which is responsible for isolating it (MediatorRegistrar.Cleanup()
+            // wraps each mediator's CleanupMediator() individually) - matching the same shape
+            // already used in ProxyBehaviour.OnDestroy()/ResetForContainerClear().
+            try
             {
-                _subscriptionTracker.UnsubscribeAll();
+                OnCleanup();
             }
+            finally
+            {
+                if (_messageBus != null)
+                {
+                    _subscriptionTracker.UnsubscribeAll();
+                }
 
-            _diContainer = null;
-            _messageBus = null;
-            _moduleContext = null;
-            _actorContext = default;
-            _messenger = default;
-            _container = default;
-            _globalContainer = default;
-            _mediatorHub = default;
+                // Scoped lifetime redesign: this mediator is the injectee dying, so every Scoped
+                // dependency dedicated to it dies with it - see
+                // MvcDiContainer.ReleaseScopedInstancesFor and the disposal-trigger map in
+                // InternalSpecs/Architecture/SCOPED_LIFETIME_REDESIGN.md.
+                _diContainer?.ReleaseScopedInstancesFor(this);
+                var globalContainer = MvcFacade.GlobalContainerOrNull;
+                if (globalContainer != null && !ReferenceEquals(globalContainer, _diContainer))
+                {
+                    globalContainer.ReleaseScopedInstancesFor(this);
+                }
+
+                _diContainer = null;
+                _messageBus = null;
+                _moduleContext = null;
+                _actorContext = default;
+                _messenger = default;
+                _container = default;
+                _globalContainer = default;
+                _mediatorHub = default;
+            }
         }
 
         /// <summary>

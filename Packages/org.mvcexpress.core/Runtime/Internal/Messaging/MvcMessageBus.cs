@@ -1,4 +1,4 @@
-﻿﻿using mvcExpress;
+﻿using mvcExpress;
 using mvcExpress.Internal.Interfaces;
 using mvcExpress.Logging;
 using System;
@@ -19,25 +19,28 @@ namespace mvcExpress.Internal.Messaging
     /// </summary>
     /// <remarks>
     /// Stored as a struct (no heap allocation, no IDisposable).
-    /// Two fields uniquely identify the slot: <see cref="Index"/> (position in the handler array)
-    /// and <see cref="Version"/> (monotonic counter that invalidates stale tokens after unsubscribe).
-    /// Debug fields are compiled out in production to keep the struct lean.
+    /// <see cref="Handle"/> is a stable identity, independent of where the subscription's handler
+    /// currently sits in storage - it stays valid even if compaction physically moves the handler
+    /// to a different array slot to reclaim space left by someone else's Unsubscribe.
+    /// <see cref="Version"/> is a monotonic counter that invalidates a token once its handle has
+    /// been freed and (possibly) reissued to a different subscriber. Debug fields are compiled out
+    /// in production to keep the struct lean.
     /// </remarks>
     public struct SubscriptionToken
     {
-        internal int Index;
+        internal int Handle;
         internal int Version;
-        
+
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         public string DebugName;
         public string SubscriberTypeName;
         public float SubscribeTime;
 #endif
-        
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal SubscriptionToken(int index, int version)
+        internal SubscriptionToken(int handle, int version)
         {
-            Index = index;
+            Handle = handle;
             Version = version;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             DebugName = null;
@@ -48,37 +51,62 @@ namespace mvcExpress.Internal.Messaging
     }
 
     /// <summary>
-    /// Typed, zero-allocation publish/subscribe message bus shared across the entire application.
+    /// The single typed, zero-allocation publish/subscribe message bus for the application.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>Fundamental architecture invariant:</b> <see cref="MvcFacade"/> owns exactly one
+    /// <see cref="MvcMessageBus"/>, and every module and actor uses that instance. Publishing is
+    /// always application-wide. Module-local buses, target-module delivery, message bridges, and
+    /// per-module filtering are intentionally not supported.
+    /// </para>
     /// Design goals (in priority order):
     /// <list type="number">
     ///   <item><description>Zero GC per publish - no boxing, no delegate wrappers, no IDisposable tokens.</description></item>
     ///   <item><description>O(n) publish where n is the subscriber count for that message type.</description></item>
-    ///   <item><description>App-wide scope - a single bus instance is shared by all modules via <see cref="MvcFacade"/>;
+    ///   <item><description>App-wide scope - the single bus is shared by all modules via <see cref="MvcFacade"/>;
     ///     a message published in any module is delivered to every subscriber regardless of which module they belong to.</description></item>
     /// </list>
     ///
-    /// Storage layout - static-per-generic-type (the "instance ID trick"):
+    /// Storage layout - static-per-generic-type:
     /// Each <c>Storage0&lt;TMessage&gt;</c> (and analogous Storage1…Storage12) is a static nested
-    /// class parameterised on the message type. It holds arrays of handler arrays indexed by
-    /// instance ID. This means handler dispatch is a single array dereference with no dictionary
-    /// lookup. Only one instance ID (0) is active at runtime; the ID and recycling machinery
-    /// are preserved in case multiple buses are needed in future.
+    /// class parameterised on the message type. It directly holds the handler array and associated
+    /// counters for the single application bus, so dispatch requires no dictionary lookup or bus-ID
+    /// indexing.
     ///
     /// Arity variants (0-12 payload parameters) are generated mechanically in the
     /// <c>MvcMessageBus.Params00.cs</c> … <c>Params12.cs</c> partial files.
     ///
     /// Thread safety:
-    /// - Subscribe/Unsubscribe are guarded by the storage lock in Editor/Development builds.
-    /// - Publish is intentionally lock-free in production (main-thread-only contract).
-    /// - Calling Publish from a background thread throws <see cref="System.InvalidOperationException"/> in
-    ///   Editor/Development builds. Use <c>MessengerApi.PublishDeferred</c> for off-thread delivery - it
-    ///   enqueues the action onto <see cref="MvcFacade"/>'s per-frame drain queue and delivers on the main thread.
+    /// - Subscribe, Unsubscribe, UnsubscribeAll, and Publish are all main-thread-only. This is a
+    ///   single, uniform contract - no build has stronger correctness guarantees than another,
+    ///   only different validation cost.
+    /// - In Editor/Development builds, that contract is validated via <c>ValidateMainThread()</c>:
+    ///   calling any of Subscribe/Unsubscribe/UnsubscribeAll/Publish from a background thread throws
+    ///   <see cref="System.InvalidOperationException"/>.
+    /// - In release builds, validation is compiled out (zero-cost) - the contract still holds, it is
+    ///   just unvalidated.
+    /// - Use <c>MessengerApi.PublishDeferred</c> for off-thread delivery - it enqueues the action onto
+    ///   <see cref="MvcFacade"/>'s per-frame drain queue and delivers on the main thread.
+    ///
+    /// Subscriber exceptions (MSG-01/DEC-11's sibling finding, MSG-02/DEC-04):
+    /// - In Editor/Development builds, each subscriber invocation inside <c>Publish</c>'s loop is
+    ///   individually try/caught and logged via <c>MvcDebug.LogError</c> - one throwing subscriber
+    ///   does not prevent later subscribers from receiving the same publish.
+    /// - In release builds, this is compiled out entirely (zero cost, byte-for-byte the same loop as
+    ///   before): a throwing subscriber propagates and stops later subscribers, exactly like today.
+    ///   This is a deliberate, permanent asymmetry - not an oversight like the one MSG-05 closed for
+    ///   thread validation - chosen because <c>Publish</c> is the framework's single hottest path and
+    ///   isolating every dispatch would add a small but permanent cost to every release build, for a
+    ///   failure mode (a subscriber throwing) that should be caught during development. A subscriber
+    ///   with a known failure risk in production should still guard itself with its own try/catch.
+    /// - Command-bound subscribers are unaffected either way: <c>MvcCommandProcessor</c> already
+    ///   wraps every command's execution in its own always-on (every build) try/catch, independent of
+    ///   this setting - see <c>MvcCommandProcessor.RaiseCommandFault</c>.
     ///
     /// Dispose/cleanup:
-    /// - <see cref="Dispose()"/> clears all handler slots for this instance and recycles the ID.
-    /// - No finalizer: the bus is process-lifetime; <see cref="MvcFacade"/> always calls <see cref="Dispose()"/> explicitly.
+    /// - <see cref="Dispose()"/> clears the application's handler slots.
+    /// - No finalizer: the bus is application-lifetime; <see cref="MvcFacade"/> always calls <see cref="Dispose()"/> explicitly.
     ///
     /// This class is <c>public</c> (not <c>internal</c>) because the partial files and
     /// <see cref="SubscriptionToken"/> must be accessible from other framework assemblies,
@@ -96,93 +124,56 @@ namespace mvcExpress.Internal.Messaging
         // (the array keeps growing) but pool sizes advertised to callers are capped here.
         private const int MAX_POOL_SIZE = 64;
 
-        // Sentinel meaning "no free slot" in an InstanceFreeListHeads entry.
+        // Sentinel meaning "no free handle" in a storage handle free-list head.
         private const int NO_FREE_SLOT = -1;
 
-        // Free-list machinery shared by every Storage<N> class (Params00-Params12). Without this,
-        // Unsubscribe only nulls a slot and SubscribeInternal always appends at `count`, so handler
-        // arrays under churn (subscribe/unsubscribe/subscribe/...) grow forever and never shrink - see H4.
-        //
-        // Encoding: each Storage<N>.InstanceFreeListHeads[instanceId] is the index of the most
-        // recently freed slot for that instance (a singly-linked free list, LIFO), or NO_FREE_SLOT
-        // if none. The "next free" pointer for a dead slot is smuggled into that slot's entry in
-        // InstanceVersions (which is otherwise unused while the slot is dead): live version stamps
-        // are always >= 2 (from `++InstanceVersionCounters`), so free slots are unambiguously
-        // recognisable by encoding them as <= 0. A value of 0 means "tail" (no next free slot);
-        // a negative value N encodes next-free-index (-N - 1). InstanceVersionCounters is `int`
-        // and increments once per subscribe with no wraparound handling; overflow would require
-        // ~2 billion subscribes on a single message type for one bus instance - theoretical, but
-        // noted here rather than silently assumed - see L7.
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int EncodeNextFree(int nextFreeIndex) => nextFreeIndex < 0 ? 0 : -(nextFreeIndex + 1);
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static int DecodeNextFree(int encoded) => encoded == 0 ? NO_FREE_SLOT : -encoded - 1;
-
-        private static int[] CreateFreeListHeads(int size)
-        {
-            var heads = new int[size];
-            for (int i = 0; i < size; i++)
-                heads[i] = NO_FREE_SLOT;
-            return heads;
-        }
-
-        // Grows an InstanceFreeListHeads array in place, filling the new region with NO_FREE_SLOT
-        // (Array.Resize zero-fills, and 0 is a valid slot index, so it cannot be used as the default).
-        private static void GrowFreeListHeads(ref int[] freeListHeads, int newSize)
-        {
-            int oldSize = freeListHeads.Length;
-            Array.Resize(ref freeListHeads, newSize);
-            for (int i = oldSize; i < newSize; i++)
-                freeListHeads[i] = NO_FREE_SLOT;
-        }
-
-        // Index into the static Storage arrays. Always 0 for the single app-wide bus instance.
-        // The ID and recycling machinery below are retained so that adding a second bus in
-        // future requires no structural change - only the wiring in MvcFacade/MvcModule.
-        private readonly int _instanceId;
-        private static int _nextInstanceId = 0;
-        private static readonly object _instanceLock = new object();
+        // Handle free-list machinery shared by every Storage<N> class (Params00-Params12).
+        // Each Storage<N>.HandleFreeListHead is the most recently freed handle number (a
+        // singly-linked free list, LIFO), or NO_FREE_SLOT if none; HandleNextFree[handle] holds
+        // the link to the next-most-recently-freed handle. This lets Subscribe reuse a handle
+        // number without ever touching the dense Handlers[] array - handle reuse and data-slot
+        // placement are fully independent, which is what keeps reentrant-subscribe-during-publish
+        // safe (MSG-01) even though handles get recycled. VersionCounter is `int` and increments
+        // once per (re)allocated handle with no wraparound handling; overflow would require ~2
+        // billion subscribes on a single message type - theoretical, but noted here rather than
+        // silently assumed.
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         // Captured once at class-load time. Used by ValidateMainThread() to detect off-thread publishes.
+        //
+        // This is also the framework's one authoritative "main thread" reference - reused by
+        // BoundedObjectPool (PERF-07 follow-up) instead of each pool capturing whichever thread
+        // happens to construct it. That per-instance capture was wrong whenever a pool's first
+        // construction was itself off-thread (e.g. Commander.Run<TCommand>() called from a
+        // background thread before the command was ever Bind-ed): the pool would then correctly
+        // reject the real main thread forever after. This field is guaranteed initialized on the
+        // real main thread before any pool can exist, because MvcFacade's constructor
+        // (`new MvcMessageBus()`, the first-ever touch of this type) always runs during
+        // MvcModule.Awake() - a Unity lifecycle callback - and no command pool can be reached
+        // without a module (and therefore a facade) already existing.
         private static readonly int _mainThreadId = Thread.CurrentThread.ManagedThreadId;
+
+        /// <summary>
+        /// The framework's authoritative main-thread ID, for other internal components that need
+        /// the same "am I on the main thread" check <see cref="ValidateMainThread"/> uses. Editor/
+        /// Development builds only, matching every other main-thread-validation mechanism here.
+        /// </summary>
+        internal static int MainThreadId => _mainThreadId;
 #endif
 
-        // Recycled IDs from disposed bus instances. Never dequeued in the current single-bus
-        // configuration (the one bus lives for the entire application session). Retained alongside
-        // GetNextInstanceId/RecycleInstanceId as forward-compatible infrastructure.
-        private static readonly System.Collections.Concurrent.ConcurrentQueue<int> _recycledInstanceIds =
-            new System.Collections.Concurrent.ConcurrentQueue<int>();
-
-        internal static int GetNextInstanceId()
-        {
-            if (_recycledInstanceIds.TryDequeue(out var recycledId))
-                return recycledId;
-
-            lock (_instanceLock)
-                return _nextInstanceId++;
-        }
-
-        internal static void RecycleInstanceId(int instanceId)
-        {
-            if (instanceId < 0) return;
-            _recycledInstanceIds.Enqueue(instanceId);
-        }
-
-        // Tracks which message types this instance has ever subscribed to, so Dispose can iterate
-        // exactly those types during ClearInstanceStorage without scanning all possible types.
+        // Tracks which message types the application bus has ever subscribed to, so Dispose can
+        // iterate exactly those types during ClearStorage without scanning all possible types.
         // ConcurrentDictionary because subscriptions can theoretically occur from any thread;
         // byte value is irrelevant - only the key set matters.
         private readonly ConcurrentDictionary<Type, byte> _usedMessageTypes = new ConcurrentDictionary<Type, byte>();
 
         private bool _disposed;
-        // Guards against re-logging the single whole-instance Dispose() failure (not tied to any
+        // Guards against re-logging the single whole-bus Dispose() failure (not tied to any
         // one message type) more than once per cleanup pass.
         private bool _disposeCleanupErrorLogged;
         // Tracks which specific types (message types or storage types) have already logged a
         // cleanup warning/error, so one failing type doesn't silence diagnostics for every other
-        // type during the same Dispose() pass - see L8.
+        // type during the same Dispose() pass.
         private readonly HashSet<Type> _perTypeCleanupErrorLogged = new HashSet<Type>();
 
         // Maps each IMessage<...> generic type definition to its payload arity (0-12).
@@ -224,7 +215,7 @@ namespace mvcExpress.Internal.Messaging
             {
                 // Always locked - HashSet<T> is not thread-safe, so an unsynchronized "fast path"
                 // read here would race a concurrent Add(); dev-only code, so the lock's cost is
-                // irrelevant - see L6.
+                // irrelevant.
                 lock (_validationLock)
                 {
                     if (_validatedTypes.Contains(messageType))
@@ -288,10 +279,17 @@ namespace mvcExpress.Internal.Messaging
             {
                 public FieldInfo LockField;
                 public FieldInfo HandlersField;
-                public FieldInfo VersionsField;
-                public FieldInfo CountsField;
-                public FieldInfo VersionCountersField; // ADDED: For complete cleanup
-                public FieldInfo FreeListHeadsField; // Free-list head per instance - see H4 fix
+                public FieldInfo SlotOwnerField;
+                public FieldInfo CountField;
+                public FieldInfo LiveCountField;
+                public FieldInfo HasPendingHolesField;
+                public FieldInfo HandleToSlotField;
+                public FieldInfo HandleVersionField;
+                public FieldInfo HandleNextFreeField;
+                public FieldInfo HandleCountField;
+                public FieldInfo HandleFreeListHeadField;
+                public FieldInfo VersionCounterField;
+                public FieldInfo PublishDepthField;
             }
 
             public static StorageFieldInfo GetOrCache(Type storageType)
@@ -311,11 +309,18 @@ namespace mvcExpress.Internal.Messaging
                     var info = new StorageFieldInfo
                     {
                         LockField = storageType.GetField("Lock", BindingFlags.NonPublic | BindingFlags.Static),
-                        HandlersField = storageType.GetField("InstanceHandlers", BindingFlags.NonPublic | BindingFlags.Static),
-                        VersionsField = storageType.GetField("InstanceVersions", BindingFlags.NonPublic | BindingFlags.Static),
-                        CountsField = storageType.GetField("InstanceCounts", BindingFlags.NonPublic | BindingFlags.Static),
-                        VersionCountersField = storageType.GetField("InstanceVersionCounters", BindingFlags.NonPublic | BindingFlags.Static), // ADDED
-                        FreeListHeadsField = storageType.GetField("InstanceFreeListHeads", BindingFlags.NonPublic | BindingFlags.Static)
+                        HandlersField = storageType.GetField("Handlers", BindingFlags.NonPublic | BindingFlags.Static),
+                        SlotOwnerField = storageType.GetField("SlotOwner", BindingFlags.NonPublic | BindingFlags.Static),
+                        CountField = storageType.GetField("Count", BindingFlags.NonPublic | BindingFlags.Static),
+                        LiveCountField = storageType.GetField("LiveCount", BindingFlags.NonPublic | BindingFlags.Static),
+                        HasPendingHolesField = storageType.GetField("HasPendingHoles", BindingFlags.NonPublic | BindingFlags.Static),
+                        HandleToSlotField = storageType.GetField("HandleToSlot", BindingFlags.NonPublic | BindingFlags.Static),
+                        HandleVersionField = storageType.GetField("HandleVersion", BindingFlags.NonPublic | BindingFlags.Static),
+                        HandleNextFreeField = storageType.GetField("HandleNextFree", BindingFlags.NonPublic | BindingFlags.Static),
+                        HandleCountField = storageType.GetField("HandleCount", BindingFlags.NonPublic | BindingFlags.Static),
+                        HandleFreeListHeadField = storageType.GetField("HandleFreeListHead", BindingFlags.NonPublic | BindingFlags.Static),
+                        VersionCounterField = storageType.GetField("VersionCounter", BindingFlags.NonPublic | BindingFlags.Static),
+                        PublishDepthField = storageType.GetField("PublishDepth", BindingFlags.NonPublic | BindingFlags.Static)
                     };
 
                     _cache[storageType] = info;
@@ -324,10 +329,7 @@ namespace mvcExpress.Internal.Messaging
             }
         }
 
-        public MvcMessageBus()
-        {
-            _instanceId = GetNextInstanceId();
-        }
+        internal MvcMessageBus() { }
 
         public void Dispose()
         {
@@ -341,29 +343,28 @@ namespace mvcExpress.Internal.Messaging
 
             try
             {
-                ClearInstanceStorage();
+                ClearStorage();
             }
             catch (Exception ex)
             {
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                // A teardown exception must be visible even in a clean release build, unlike
+                // routine diagnostic logging, so it also always goes through Unity's own
+                // Debug.LogException (bypassing MvcDebug's stripping) rather than being discarded.
                 if (!_disposeCleanupErrorLogged)
                 {
                     MvcDebug.LogError($"Critical error during message bus disposal cleanup: {ex.Message}");
+                    UnityEngine.Debug.LogException(ex);
                     _disposeCleanupErrorLogged = true;
                 }
-#else
-                _ = ex;
-#endif
             }
 
             if (disposing)
             {
                 _usedMessageTypes.Clear();
-                RecycleInstanceId(_instanceId);
             }
         }
 
-        private void ClearInstanceStorage()
+        private void ClearStorage()
         {
             // ConcurrentDictionary.Keys is thread-safe
             foreach (var messageType in _usedMessageTypes.Keys)
@@ -448,7 +449,6 @@ namespace mvcExpress.Internal.Messaging
             }
         }
 
-        // IMPROVEMENT 4: Reset InstanceVersionCounters in addition to other fields
         private void ClearStorageSlot(Type storageType)
         {
             var fieldInfo = ReflectionCache.GetOrCache(storageType);
@@ -458,7 +458,7 @@ namespace mvcExpress.Internal.Messaging
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
                 if (_perTypeCleanupErrorLogged.Add(storageType))
                 {
-                    MvcDebug.LogWarning($"Could not find Lock or InstanceHandlers field on storage type {storageType.Name}.");
+                    MvcDebug.LogWarning($"Could not find Lock or Handlers field on storage type {storageType.Name}.");
                 }
 #endif
                 return;
@@ -467,56 +467,33 @@ namespace mvcExpress.Internal.Messaging
             var lockObj = fieldInfo.LockField.GetValue(null);
             lock (lockObj)
             {
-                var handlers = (Array)fieldInfo.HandlersField.GetValue(null);
-                if (handlers != null && _instanceId < handlers.Length)
-                {
-                    handlers.SetValue(null, _instanceId);
-                }
-
-                var versions = (Array)fieldInfo.VersionsField.GetValue(null);
-                if (versions != null && _instanceId < versions.Length)
-                {
-                    versions.SetValue(null, _instanceId);
-                }
-
-                var counts = (Array)fieldInfo.CountsField.GetValue(null);
-                if (counts != null && _instanceId < counts.Length)
-                {
-                    counts.SetValue(0, _instanceId);
-                }
-
-                // IMPROVEMENT 4: Reset version counters to ensure full cleanup
-                var versionCounters = (Array)fieldInfo.VersionCountersField?.GetValue(null);
-                if (versionCounters != null && _instanceId < versionCounters.Length)
-                {
-                    versionCounters.SetValue(0, _instanceId);
-                }
-
-                // H4 fix: reset the free-list head too, otherwise a disposed instance ID that gets
-                // recycled (RecycleInstanceId) would resume with a stale free-slot pointer into
-                // handler/version arrays that EnsureCapacity is about to recreate from scratch.
-                var freeListHeads = (Array)fieldInfo.FreeListHeadsField?.GetValue(null);
-                if (freeListHeads != null && _instanceId < freeListHeads.Length)
-                {
-                    freeListHeads.SetValue(NO_FREE_SLOT, _instanceId);
-                }
+                fieldInfo.HandlersField.SetValue(null, null);
+                fieldInfo.SlotOwnerField?.SetValue(null, null);
+                fieldInfo.CountField?.SetValue(null, 0);
+                fieldInfo.LiveCountField?.SetValue(null, 0);
+                fieldInfo.HasPendingHolesField?.SetValue(null, false);
+                fieldInfo.HandleToSlotField?.SetValue(null, null);
+                fieldInfo.HandleVersionField?.SetValue(null, null);
+                fieldInfo.HandleNextFreeField?.SetValue(null, null);
+                fieldInfo.HandleCountField?.SetValue(null, 0);
+                fieldInfo.HandleFreeListHeadField?.SetValue(null, NO_FREE_SLOT);
+                fieldInfo.VersionCounterField?.SetValue(null, 0);
+                fieldInfo.PublishDepthField?.SetValue(null, 0);
             }
         }
 
         /// <summary>
-        /// Returns whether a no-payload message has ever had a subscriber on this bus instance
-        /// that has not since been cleared by <c>UnsubscribeAll</c>.
+        /// Returns whether at least one subscriber is currently attached for a no-payload message.
         /// </summary>
         /// <remarks>
         /// This overload is for zero-payload <see cref="IMessage"/> types. Arity 1-12 overloads
         /// (for <c>IMessage&lt;T1..T12&gt;</c>) live alongside <c>Publish</c>/<c>Subscribe</c> in
         /// the matching <c>MvcMessageBus.ParamsNN.cs</c> partial.
         /// <para>
-        /// This is a high-watermark check, not a live subscriber count: unsubscribing an
-        /// individual handler via either <c>Unsubscribe</c> overload does NOT make this return
-        /// false again - only <c>UnsubscribeAll</c> resets it. Do not use this to detect "the
-        /// last subscriber just left"; it only tells you whether this message type has ever been
-        /// subscribed to since the last full clear.
+        /// This reflects the live subscriber count: each <c>Unsubscribe</c> overload decrements it
+        /// immediately, so this correctly returns <c>false</c> again once the last subscriber for
+        /// this message type has been individually removed, not only after a full
+        /// <c>UnsubscribeAll</c>.
         /// </para>
         /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -528,13 +505,12 @@ namespace mvcExpress.Internal.Messaging
                 return false;
             }
 
-            if (_instanceId >= Storage0<TMessage>.InstanceHandlers.Length ||
-                Storage0<TMessage>.InstanceHandlers[_instanceId] == null)
+            if (Storage0<TMessage>.Handlers == null)
             {
                 return false;
             }
 
-            return Storage0<TMessage>.InstanceCounts[_instanceId] > 0;
+            return Storage0<TMessage>.LiveCount > 0;
         }
 
         #region Debug Statistics
@@ -562,7 +538,7 @@ namespace mvcExpress.Internal.Messaging
         }
 
         /// <summary>
-        /// Get statistics for all registered message types in this bus instance.
+        /// Get statistics for all registered message types on the application bus.
         /// </summary>
         /// <returns>List of statistics for each message type.</returns>
         public List<MessageSubscriptionStatistics> GetSubscriptionStatistics()
@@ -639,14 +615,13 @@ namespace mvcExpress.Internal.Messaging
                     return false;
 
                 var fieldInfo = ReflectionCache.GetOrCache(storageType);
-                if (fieldInfo.CountsField == null)
+                // Read the live count, not the slot high-water count - this API is the same "does
+                // anyone currently care about this message type" question HasSubscribers answers,
+                // just reached via reflection for arbitrary-arity debug statistics.
+                if (fieldInfo.LiveCountField == null)
                     return false;
 
-                var counts = (Array)fieldInfo.CountsField.GetValue(null);
-                if (counts == null || _instanceId >= counts.Length)
-                    return false;
-
-                var count = (int)counts.GetValue(_instanceId);
+                var count = (int)fieldInfo.LiveCountField.GetValue(null);
                 return count > 0;
             }
             catch
@@ -713,16 +688,19 @@ namespace mvcExpress.Internal.Messaging
         /// background thread. Active only in Editor/Development builds - zero overhead in production.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static void ValidateMainThread()
+        // [CallerMemberName] fills in the caller's own method name (Publish, Subscribe, Unsubscribe,
+        // UnsubscribeAll, ...) automatically at every call site - none of them need to pass it
+        // explicitly, so this stays accurate as new callers adopt the same main-thread contract.
+        internal static void ValidateMainThread([CallerMemberName] string callerName = "Publish")
         {
             if (Thread.CurrentThread.ManagedThreadId != _mainThreadId)
             {
                 throw new InvalidOperationException(
-                    $"Messenger.Publish was called from a background thread " +
+                    $"Messenger.{callerName} was called from a background thread " +
                     $"(thread ID {Thread.CurrentThread.ManagedThreadId}; main thread ID {_mainThreadId}).\n" +
-                    "The message bus is not thread-safe - Publish must run on the Unity main thread.\n" +
-                    "If you are publishing after Task.Run or from a background callback, use " +
-                    "Messenger.PublishDeferred<TMessage>() instead. " +
+                    "The message bus is not thread-safe - it must run on the Unity main thread.\n" +
+                    "If you are calling it after Task.Run or from a background callback, use " +
+                    "Messenger.PublishDeferred<TMessage>() instead to publish. " +
                     "It enqueues delivery to the next Update frame."
                 );
             }

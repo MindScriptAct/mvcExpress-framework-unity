@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEditor;
 using UnityEngine;
-using mvcExpress.Internal.Proxy;
+using mvcExpress.Internal.Proxies;
 
 namespace mvcExpress.Editor.Core
 {

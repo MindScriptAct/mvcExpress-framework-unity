@@ -1,9 +1,11 @@
 using System;
+using System.Text.RegularExpressions;
 using mvcExpress.Internal.Commands;
 using mvcExpress.Internal.DependencyInjection;
 using mvcExpress.Internal.Messaging;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 using Object = UnityEngine.Object;
 
 namespace mvcExpress.Tests.Scenarios
@@ -25,22 +27,30 @@ namespace mvcExpress.Tests.Scenarios
 
         private readonly struct OnceMessage : IMessage { }
         private readonly struct OncePayloadMessage : IMessage<int> { }
+        private readonly struct OnceArity6Message : IMessage<int, int, int, int, int, int> { }
 
         private sealed class FireOnceMediator : MediatorBehaviour
         {
             public static int HandlerCallCount;
             public static int LastPayload;
+            public static int LastArity6Sum;
 
             public static void Reset()
             {
                 HandlerCallCount = 0;
                 LastPayload = 0;
+                LastArity6Sum = 0;
             }
 
             protected override void OnInitialized()
             {
                 Messenger.SubscribeOnce<OnceMessage>(() => HandlerCallCount++);
                 Messenger.SubscribeOnce<OncePayloadMessage, int>(p => { HandlerCallCount++; LastPayload = p; });
+                Messenger.SubscribeOnce<OnceArity6Message, int, int, int, int, int, int>((p1, p2, p3, p4, p5, p6) =>
+                {
+                    HandlerCallCount++;
+                    LastArity6Sum = p1 + p2 + p3 + p4 + p5 + p6;
+                });
             }
         }
 
@@ -116,21 +126,46 @@ namespace mvcExpress.Tests.Scenarios
             Object.DestroyImmediate(mediator.gameObject);
         }
 
+        /// <summary>
+        /// SubscribeOnce was extended from arity 0-5 up to 0-12 to match the base Subscribe/Publish
+        /// API (MSG-08). This confirms the mediator-level wrapper (auto-unsubscribe, subscription
+        /// tracking) also holds at one of the newly-added arities, not just at the mechanically
+        /// identical bus-level overload covered in MvcMessageBus_UnitTests.
+        /// </summary>
+        [Test]
+        public void SubscribeOnce_ArityHigh_HandlerReceivesPayloadAndFiresOnce()
+        {
+            var mediator = CreateMediator<FireOnceMediator>("FireOnceMediator");
+
+            _bus.Publish<OnceArity6Message, int, int, int, int, int, int>(1, 2, 3, 4, 5, 6);
+            _bus.Publish<OnceArity6Message, int, int, int, int, int, int>(10, 20, 30, 40, 50, 60);
+
+            Assert.That(FireOnceMediator.LastArity6Sum, Is.EqualTo(21),
+                "The one-time handler must receive the payload from the first publish only, proving " +
+                "SubscribeOnce's auto-unsubscribe behavior holds at the newly-added higher arities (6-12), not just 0-5.");
+
+            Object.DestroyImmediate(mediator.gameObject);
+        }
+
         [Test]
         public void SubscribeOnce_HandlerThrows_StillUnsubscribesViaFinally()
         {
             var mediator = CreateMediator<ThrowingOnceMediator>("ThrowingOnceMediator");
 
-            // Publish<TMessage>() invokes handler() directly with no try/catch around the call
-            // (see MvcMessageBus.Params00.cs), so an exception thrown by a subscribed handler
-            // propagates straight out of Publish. SubscribeOnce's wrapper only wraps the *user*
-            // handler in its own try/finally to guarantee the unsubscribe runs - it does not
-            // swallow the exception, so it still surfaces here.
-            Assert.Throws<InvalidOperationException>(() => _bus.Publish<OnceMessage>());
+            // In Editor/Development builds, Publish now catches each subscriber's exception
+            // individually and logs it (MSG-02 - see MvcMessageBus.cs's class remarks), so it no
+            // longer propagates out of Publish itself in this build configuration. SubscribeOnce's
+            // own wrapper still wraps the *user* handler in its own try/finally specifically to
+            // guarantee the unsubscribe runs regardless of whether/where the exception is ultimately
+            // caught - this test still pins that finally-based auto-unsubscribe, just observed via
+            // the logged error instead of a propagated exception.
+            LogAssert.Expect(LogType.Error, new Regex("Subscriber '.*' threw on OnceMessage:.*intentional test failure"));
+            Assert.DoesNotThrow(() => _bus.Publish<OnceMessage>());
             Assert.That(ThrowingOnceMediator.HandlerCallCount, Is.EqualTo(1),
                 "Precondition: the throwing handler must have run exactly once.");
 
-            // If the finally-unsubscribe did not run, this second publish would throw again.
+            // If the finally-unsubscribe did not run, this second publish would invoke (and log
+            // from) the handler again.
             Assert.DoesNotThrow(() => _bus.Publish<OnceMessage>(),
                 "SubscribeOnce must unsubscribe in a finally block even when the handler throws, " +
                 "so the wrapper delegate is not still subscribed for a second publish.");

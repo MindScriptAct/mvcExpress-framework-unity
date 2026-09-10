@@ -166,8 +166,10 @@ namespace mvcExpress
         /// Lifecycle of this dependency.
         /// Permanent: Lives for the entire module lifetime (default, recommended for most cases). Cannot be unregistered.
         /// Transient: Can be destroyed/unregistered dynamically (use when lifecycle is tied to runtime state).
-        /// Scoped: Fresh instance per resolution scope. Only valid for non-MonoBehaviour types (plain Proxy or
-        /// plain Service classes) - throws at scan time if applied to a ProxyBehaviour or MonoBehaviour service.
+        /// Scoped: One dedicated instance per consuming actor (injectee), created on that actor's first
+        /// resolution and disposed when the actor itself is torn down - see SCOPED_LIFETIME_REDESIGN.md.
+        /// Only valid for non-MonoBehaviour types (plain Proxy or plain Service classes) - throws at scan
+        /// time if applied to a ProxyBehaviour or MonoBehaviour service.
         /// Default: Permanent
         /// </summary>
         public RegistrationLifecycle Lifecycle { get; set; } = RegistrationLifecycle.Permanent;

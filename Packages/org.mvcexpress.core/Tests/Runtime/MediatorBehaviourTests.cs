@@ -40,6 +40,13 @@ namespace mvcExpress.Tests
             }
         }
 
+        // Throws from OnCleanup() - used to prove teardown (subscription removal, field clearing)
+        // survives a throwing mediator lifecycle callback instead of being skipped (COR-16).
+        private class ThrowingOnCleanupMediator : MediatorBehaviour
+        {
+            protected override void OnCleanup() => throw new InvalidOperationException("Boom.");
+        }
+
         // Mediator whose OnEnable() probes Container.TryResolve and records the result,
         // so a test can assert on it afterward. Unity invokes OnEnable through its own
         // engine lifecycle (not through MediatorBehaviour.Initialize), so this reproduces
@@ -263,6 +270,37 @@ namespace mvcExpress.Tests
 
             Assert.AreEqual(1, _mediator.OnCleanupCallCount,
                 "OnCleanup must not fire more than once even when CleanupMediator is called twice.");
+        }
+
+        [Test]
+        public void CleanupMediator_OwnOnCleanupThrows_SubscriptionsStillUnsubscribed()
+        {
+            // CleanupMediator() used to call OnCleanup() with no try/finally, so a throwing
+            // override skipped SubscriptionTracker.UnsubscribeAll() (and scoped-dependency release)
+            // entirely, leaking every message-bus subscription this mediator owned (COR-16).
+            var go = new GameObject(nameof(ThrowingOnCleanupMediator));
+            var mediator = go.AddComponent<ThrowingOnCleanupMediator>();
+            mediator.Initialize(_module, _container, _messageBus, deferOnInitialized: false);
+
+            bool unsubscribeCalled = false;
+            mediator.SubscriptionTracker.Track(
+                typeof(object), mediator, default(SubscriptionToken), 0,
+                _ => { unsubscribeCalled = true; });
+
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => mediator.CleanupMediator(),
+                    "OnCleanup()'s own exception must still propagate to the caller - this fix must " +
+                    "not silently swallow it, only guarantee cleanup still happens around it.");
+
+                Assert.IsTrue(unsubscribeCalled,
+                    "Tracked unsubscribe action must still be invoked even though the mediator's own " +
+                    "OnCleanup() threw.");
+            }
+            finally
+            {
+                Object.DestroyImmediate(go);
+            }
         }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD

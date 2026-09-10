@@ -24,7 +24,7 @@ namespace mvcExpress.Internal.Initialization
     /// - Otherwise, one reflection call per scope to invoke <c>ToLogicAs&lt;T&gt;()</c> /
     ///   <c>ToViewAs&lt;T&gt;()</c>.
     ///
-    /// Only handles <see cref="ProxyBehaviour"/> types. Plain C# <see cref="Proxy"/> registration
+    /// Only handles <see cref="ProxyBehaviour"/> types. Plain C# <see cref="Proxies"/> registration
     /// is done inline in <see cref="ModuleInitializer"/> via the non-generic <c>Register(object, Type)</c>
     /// overload (no helper needed there).
     ///

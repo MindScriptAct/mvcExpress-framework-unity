@@ -1,6 +1,7 @@
 // IMPORTANT: MvcCommandProcessor uses static CommandPool<TCommand> arrays.
 // Always Dispose() the processor in TearDown to prevent pool state leaking between tests.
 using System;
+using System.Threading.Tasks;
 using NUnit.Framework;
 using mvcExpress;
 using mvcExpress.Internal.DependencyInjection;
@@ -99,6 +100,18 @@ namespace mvcExpress.Tests
             public static void Reset() => DisposeCount = 0;
         }
 
+        // Used only to have a distinct generic slot in static pool storage for the
+        // background-thread pool-creation test below - never actually executed.
+        private class BackgroundPoolTestCommand : Command
+        {
+            public override void Execute() { }
+        }
+
+        private class TestAsyncCommand : CommandAsync
+        {
+            public override Task ExecuteAsync() => Task.CompletedTask;
+        }
+
         [SetUp]
         public void Setup()
         {
@@ -173,8 +186,15 @@ namespace mvcExpress.Tests
                 "A valid command with no scoped dependency must be returned and reused.");
         }
 
+        // Updated under the Scoped lifetime redesign (see
+        // InternalSpecs/Architecture/SCOPED_LIFETIME_REDESIGN.md): a scoped dependency is now a
+        // dedicated instance tied to the owning command INSTANCE's own lifetime, not a signal to
+        // force-discard that instance after one use. These two tests used to assert the opposite
+        // (v1) behavior - see Tests/Scenarios/ScopedLifetime/CommandScopedLifetimeScenarioTests.cs
+        // for the full v2 behavioral suite this pair now matches.
+
         [Test]
-        public void Run_WithScopedDependency_DoesNotReturnCommandToPool()
+        public void Run_WithScopedDependency_ReusesCommandFromPool()
         {
             _diContainer.Register(new ScopedDependencyProxy()).ToLogic().AsScoped();
             _processor.CreatePool<ScopedDependencyCommand>(1);
@@ -182,12 +202,14 @@ namespace mvcExpress.Tests
             _processor.Run<ScopedDependencyCommand>();
             _processor.Run<ScopedDependencyCommand>();
 
-            Assert.That(ScopedDependencyCommand.CreatedCount, Is.EqualTo(2),
-                "Commands that resolve scoped dependencies must be discarded instead of pooled.");
+            Assert.That(ScopedDependencyCommand.CreatedCount, Is.EqualTo(1),
+                "A command with a scoped dependency must now be reused across executions, exactly " +
+                "like any other pooled command - the scoped dependency is dedicated to this command " +
+                "instance's own lifetime, not a signal to discard it after one use.");
         }
 
         [Test]
-        public void Run_WithScopedDependency_DisposesDiscardedDisposableCommand()
+        public void Run_WithScopedDependency_NotDisposedWhileStillPooled()
         {
             DisposableScopedCommand.Reset();
             _diContainer.Register(new ScopedDependencyProxy()).ToLogic().AsScoped();
@@ -195,8 +217,10 @@ namespace mvcExpress.Tests
 
             _processor.Run<DisposableScopedCommand>();
 
-            Assert.That(DisposableScopedCommand.DisposeCount, Is.EqualTo(1),
-                "A command discarded due to a scoped dependency must still be disposed, even though it bypasses BoundedObjectPool.Return().");
+            Assert.That(DisposableScopedCommand.DisposeCount, Is.EqualTo(0),
+                "A command with a scoped dependency must not be disposed after an ordinary execution " +
+                "that leaves it sitting in the pool for reuse - only an actual discard (capacity " +
+                "overflow, Invalidate(), or processor/module teardown) disposes it.");
         }
 
         [Test]
@@ -253,6 +277,76 @@ namespace mvcExpress.Tests
             Assert.That(snapshot[0].CommandType, Is.EqualTo(typeof(TestCommand)));
             Assert.That(snapshot[0].Mode, Is.EqualTo(MvcCommandProcessor.CommandBindingMode.Sync));
             Assert.That(snapshot[0].PoolMax, Is.EqualTo(4));
+        }
+#endif
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        /// <summary>
+        /// PERF-07 follow-up (thread-guard fix, part 1 - the shared authoritative main thread).
+        /// A command pool's owner-thread check used to compare against whichever thread happened to
+        /// construct the pool, not the framework's actual main thread. GetOrCreatePool itself never
+        /// validated a thread at construction time (nothing did, before this fix) - a pool could be
+        /// silently born off the main thread, and only later, when the REAL main thread tried to use
+        /// it, would the (backwards) rejection surface. Constructing the pool directly here from a
+        /// background thread reproduces that exact condition; the main thread's own Get() must still
+        /// succeed, because the check now compares against the shared
+        /// MvcMessageBus.MainThreadId - the same answer no matter which thread constructed this
+        /// particular pool.
+        /// </summary>
+        [Test]
+        public void GetOrCreatePool_PoolFirstConstructedOnBackgroundThread_MainThreadCanStillUseIt()
+        {
+            var pool = Task.Run(() => _processor.GetOrCreatePool<BackgroundPoolTestCommand>(1)).Result;
+
+            Assert.DoesNotThrow(() => pool.Get(),
+                "The pool's thread check must compare against the framework's shared main thread, " +
+                "not the thread that happened to construct the pool - otherwise a pool first " +
+                "touched off-thread would reject the real main thread forever after.");
+        }
+
+        /// <summary>
+        /// PERF-07 follow-up (thread-guard fix, part 2 - validate at the actual entry point).
+        /// Unlike message-triggered execution (already main-thread-only behind
+        /// MvcMessageBus.Publish's own validation), Run() had no main-thread guarantee at all before
+        /// this fix - it went straight to GetOrCreatePool with nothing checking the calling thread.
+        /// </summary>
+        [Test]
+        public void Run_CalledFromBackgroundThread_ThrowsInvalidOperationException()
+        {
+            var backgroundTask = Task.Run(() => _processor.Run<TestCommand>());
+
+            var aggregate = Assert.Throws<AggregateException>(() => backgroundTask.Wait());
+            Assert.IsInstanceOf<InvalidOperationException>(aggregate.InnerException,
+                "Direct command execution (Run) must validate main-thread use itself, before ever " +
+                "touching a command pool - not rely on the pool's own check as the only guard.");
+            StringAssert.Contains("Commander.Run", aggregate.InnerException.Message,
+                "The error should name the actual entry point that was misused (Run), not an " +
+                "internal pooling class the caller has never heard of.");
+        }
+
+        /// <summary>Same as the Run() test above, for the async direct-execution entry point.</summary>
+        [Test]
+        public void RunAsync_CalledFromBackgroundThread_ThrowsInvalidOperationException()
+        {
+            var backgroundTask = Task.Run(async () => await _processor.RunAsync<TestAsyncCommand>());
+
+            var aggregate = Assert.Throws<AggregateException>(() => backgroundTask.Wait());
+            Assert.IsInstanceOf<InvalidOperationException>(aggregate.InnerException,
+                "Direct async command execution (RunAsync) must validate main-thread use itself - " +
+                "the check runs synchronously before the first await, so it still faults the " +
+                "returned Task even though a throw inside an async method can't propagate to the " +
+                "caller directly.");
+        }
+
+        /// <summary>Same guard, for the third public pool-creation entry point (not reached via Run/RunAsync).</summary>
+        [Test]
+        public void CreatePool_CalledFromBackgroundThread_ThrowsInvalidOperationException()
+        {
+            var backgroundTask = Task.Run(() => _processor.CreatePool<TestCommand>(4));
+
+            var aggregate = Assert.Throws<AggregateException>(() => backgroundTask.Wait());
+            Assert.IsInstanceOf<InvalidOperationException>(aggregate.InnerException,
+                "CreatePool must validate main-thread use before configuring a command pool.");
         }
 #endif
 

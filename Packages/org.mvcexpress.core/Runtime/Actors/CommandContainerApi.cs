@@ -57,7 +57,10 @@ namespace mvcExpress
 
             var builder = _context.DiContainer.Register(instance);
             LogRegistration(typeof(T), instance, module, filePath, lineNumber);
-            InitializeDynamicProxy(instance, module);
+            // Deferred until the builder chain commits as non-scoped - see
+            // RegistrationBuilder<T>.OnNonScopedCommitted. A .AsScoped() chain must never
+            // initialize this throwaway seed instance.
+            builder.OnNonScopedCommitted = i => InitializeDynamicRegistration(i, module);
             return builder;
         }
 
@@ -86,7 +89,8 @@ namespace mvcExpress
 
             var builder = _context.DiContainer.Register(instance, type);
             LogRegistration(type, instance, module, filePath, lineNumber);
-            InitializeDynamicProxy(instance, module);
+            // See the matching comment on Register<T> above.
+            builder.OnNonScopedCommitted = i => InitializeDynamicRegistration(i, module);
             return builder;
         }
 
@@ -132,6 +136,14 @@ namespace mvcExpress
         /// The new GameObject is parented under the module's Model container. Throws if the command
         /// has no module reference.
         /// </remarks>
+        /// <remarks>
+        /// Implemented directly here (not by delegating to the module-setup registration API)
+        /// because that API's <c>RegisterBehaviour</c> is compiled out under
+        /// <c>MVC_EXPRESS_NO_CODE</c>. Command-time dynamic registration is a runtime feature,
+        /// not part of the Code composition style, and must keep working even when Code-style
+        /// module setup is disabled - mirrors the sibling <see cref="Register{T}"/> method above,
+        /// which is unguarded for the same reason.
+        /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public RegistrationBuilder<TBehaviour> RegisterBehaviour<TBehaviour>() where TBehaviour : MonoBehaviour
         {
@@ -141,7 +153,17 @@ namespace mvcExpress
                 throw new InvalidOperationException("[MvcExpress] Command is not initialized with a module reference. Cannot RegisterBehaviour.");
             }
 
-            return new ModuleRegistrationContainerApi(module).RegisterBehaviour<TBehaviour>();
+            module.EnsureCoreServicesInitialized();
+            module.EnsureMvcContainers();
+
+            var go = new GameObject(typeof(TBehaviour).Name);
+            go.transform.SetParent(module.ModelContainer != null ? module.ModelContainer : module.transform, false);
+
+            var behaviour = go.AddComponent<TBehaviour>();
+            module.OnContainerRegistering(behaviour);
+            WarnForCodeRegistration(behaviour, module);
+
+            return module.DiContainer.Register(behaviour);
         }
 
         /// <summary>
@@ -165,13 +187,16 @@ namespace mvcExpress
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool TryResolve<T>(out T value)
         {
-            return _context.DiContainer.TryResolve<T>(out value);
+            return _context.DiContainer.TryResolve<T>(out value, _context.Actor);
         }
 
-        // Dynamically registered proxies need framework context immediately because
-        // they are added after the normal module initialization pipeline has passed.
+        // Dynamically registered instances need framework context immediately because they are
+        // added after the normal module initialization pipeline has passed.
+        // Static: this is captured by a lambda from a struct's instance method
+        // (Register<T>/Register), which cannot close over an instance member ('this') of the
+        // struct itself - see the OnNonScopedCommitted assignment above.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private void InitializeDynamicProxy(object instance, MvcModule module)
+        private static void InitializeDynamicRegistration(object instance, MvcModule module)
         {
             if (module == null)
             {
@@ -185,6 +210,12 @@ namespace mvcExpress
             else if (instance is ProxyBehaviour proxyBehaviour)
             {
                 proxyBehaviour.Initialize(module, module.DiContainer, module.MessageBus, deferOnInitialized: false);
+            }
+            else if (instance is IMvcLifecycle initializable)
+            {
+                MvcInjectionUtility.InjectMembers(instance, module.DiContainer, useViewScope: false);
+                initializable.OnInitialized();
+                module.TrackDynamicLifecycleService(initializable);
             }
         }
 

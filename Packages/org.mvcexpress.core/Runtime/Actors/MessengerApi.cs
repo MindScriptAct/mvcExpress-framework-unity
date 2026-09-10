@@ -24,8 +24,10 @@ namespace mvcExpress
     /// a <c>struct</c>. Prefer <c>struct</c> messages on high-frequency paths to avoid GC pressure.
     /// </para>
     /// <para>
-    /// All publish calls are dispatched on the single app-wide bus shared by all modules.
-    /// Every subscriber anywhere in the application will receive the message.
+    /// All publish calls are dispatched on the application's single message bus. This is a
+    /// fundamental scope invariant: every module and actor shares that bus, and every matching
+    /// subscriber anywhere in the application receives the message. This API cannot select or
+    /// isolate a module.
     /// </para>
     /// <para>
     /// <b>Thread safety:</b> <c>Publish</c> must be called from the Unity main thread. Calling it
@@ -1022,7 +1024,7 @@ namespace mvcExpress
         }
 
         // Every publish records caller info for diagnostics before dispatching to the shared bus.
-        // Call sites are unconditional, so the body (not the method) is guarded here - see L1.
+        // Call sites are unconditional, so the body (not the method) is guarded here.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private void LogPublished<TMessage>(string filePath, int lineNumber, string memberName)
         {
